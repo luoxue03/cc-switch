@@ -60,12 +60,6 @@
           "ccswitch"
         ]
       }
-    },
-    "updater": {
-      "pubkey": "RWRKNLZYKqjJ7MS5RpT8yuP70e5kmoMN/0JpGF+DkgPn5qxxJp6Fcy11",
-      "endpoints": [
-        "https://github.com/luoxue03/cc-switch/releases/latest/download/latest.json"
-      ]
     }
   }
 }
