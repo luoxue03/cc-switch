@@ -514,7 +514,7 @@ impl RequestForwarder {
                         provider: provider.clone(),
                         claude_api_format,
                         connection_guard: None,
-                    codex_responses_to_chat: codex_to_chat,
+                    codex_responses_to_chat,
                 });
                 }
                 Err(e) => {
@@ -617,7 +617,7 @@ impl RequestForwarder {
                                         provider: provider.clone(),
                                         claude_api_format,
                                         connection_guard: None,
-                    codex_responses_to_chat: codex_to_chat,
+                    codex_responses_to_chat,
                 });
                                 }
                                 Err(retry_err) => {
@@ -766,7 +766,7 @@ impl RequestForwarder {
                                             provider: provider.clone(),
                                             claude_api_format,
                                             connection_guard: None,
-                    codex_responses_to_chat: codex_to_chat,
+                    codex_responses_to_chat,
                 });
                                     }
                                     Err(retry_err) => {
@@ -926,7 +926,7 @@ impl RequestForwarder {
                                         provider: provider.clone(),
                                         claude_api_format,
                                         connection_guard: None,
-                    codex_responses_to_chat: codex_to_chat,
+                    codex_responses_to_chat,
                 });
                                 }
                                 Err(retry_err) => {
@@ -1880,7 +1880,7 @@ impl RequestForwarder {
             let response = self
                 .prepare_success_response_for_failover(response, request_is_streaming)
                 .await?;
-            Ok((response, resolved_claude_api_format))
+            Ok((response, resolved_claude_api_format, codex_responses_to_chat))
         } else {
             let status_code = status.as_u16();
             let body_text = String::from_utf8(response.bytes().await?.to_vec()).ok();
