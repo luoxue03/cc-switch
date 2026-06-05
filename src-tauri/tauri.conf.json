@@ -60,11 +60,6 @@
           "ccswitch"
         ]
       }
-    },
-    "updater": {
-      "endpoints": [
-        "https://github.com/farion1231/cc-switch/releases/latest/download/latest.json"
-      ]
     }
   }
 }
