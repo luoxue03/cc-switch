@@ -90,7 +90,7 @@ jobs:
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
             echo "✅ Generated temporary Tauri signing key"
           else
-            echo "TAURI_SIGNING_PRIVATE_KEY=dW50cnVzdGVkIGNvbW1lbnQ6IHRhdXJpIHNpZ25pbmcga2V5" >> "$GITHUB_ENV"
+            echo "TAURI_SIGNING_PRIVATE_KEY=" >> "$GITHUB_ENV"
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
             echo "⚠️ Using dummy signing key"
           fi
