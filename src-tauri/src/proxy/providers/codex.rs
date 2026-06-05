@@ -73,15 +73,41 @@ pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
         .unwrap_or(false)
 }
 
-pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &str) -> bool {
+pub fn should_convert_codex_responses_to_chat(
+    provider: &Provider,
+    endpoint: &str,
+    body: &JsonValue,
+) -> bool {
     let path = endpoint
         .split_once('?')
         .map_or(endpoint, |(path, _query)| path);
 
-    matches!(
+    let is_responses_endpoint = matches!(
         path,
         "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
-    ) && codex_provider_uses_chat_completions(provider)
+    );
+    
+    if !is_responses_endpoint {
+        return false;
+    }
+    
+    if !codex_provider_uses_chat_completions(provider) {
+        return false;
+    }
+    
+    // Check model-level route mode override
+    if let Some(model) = body.get("model").and_then(|v| v.as_str()) {
+        if let Some(route_mode) = get_model_route_mode(provider, model) {
+            return match route_mode.as_str() {
+                "responses" => false, // Force native Responses
+                "chat" => true,       // Force Chat Completions bridge
+                _ => true,            // Default to provider behavior
+            };
+        }
+    }
+    
+    // No override, use provider default
+    true
 }
 
 /// Extract the real upstream model configured for a Codex provider.
@@ -118,6 +144,28 @@ fn codex_provider_catalog_model_ids(provider: &Provider) -> HashSet<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+
+/// Get the route mode for a specific model from the model catalog.
+/// Returns Some("responses") or Some("chat") if explicitly set, None otherwise.
+fn get_model_route_mode(provider: &Provider, model: &str) -> Option<String> {
+    let models = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(|models| models.as_array())?;
+    
+    for entry in models {
+        let entry_model = entry.get("model").and_then(|v| v.as_str())?;
+        if entry_model.trim() == model {
+            return entry
+                .get("routeMode")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+    }
+    None
 }
 
 /// For Codex Chat providers, ensure the request uses the configured upstream
@@ -731,14 +779,8 @@ wire_api = "chat"
         }));
 
         assert!(codex_provider_uses_chat_completions(&provider));
-        assert!(should_convert_codex_responses_to_chat(
-            &provider,
-            "/responses?stream=true"
-        ));
-        assert!(!should_convert_codex_responses_to_chat(
-            &provider,
-            "/chat/completions"
-        ));
+        assert!(should_convert_codex_responses_to_chat(&provider, "/responses?stream=true", &json!({})));
+        assert!(!should_convert_codex_responses_to_chat(&provider, "/chat/completions", &json!({})));
     }
 
     #[test]
@@ -748,10 +790,7 @@ wire_api = "chat"
         }));
 
         assert!(codex_provider_uses_chat_completions(&provider));
-        assert!(should_convert_codex_responses_to_chat(
-            &provider,
-            "/v1/responses/compact"
-        ));
+        assert!(should_convert_codex_responses_to_chat(&provider, "/v1/responses/compact", &json!({})));
     }
 
     #[test]
@@ -765,10 +804,7 @@ wire_api = "chat"
         });
 
         assert!(codex_provider_uses_chat_completions(&provider));
-        assert!(should_convert_codex_responses_to_chat(
-            &provider,
-            "/responses/compact?stream=true"
-        ));
+        assert!(should_convert_codex_responses_to_chat(&provider, "/responses/compact?stream=true", &json!({})));
     }
 
     #[test]
@@ -781,10 +817,7 @@ wire_api = "chat"
             ..Default::default()
         });
 
-        assert!(should_convert_codex_responses_to_chat(
-            &provider,
-            "/v1/responses"
-        ));
+        assert!(should_convert_codex_responses_to_chat(&provider, "/v1/responses", &json!({})));
     }
 
     #[test]
@@ -961,4 +994,58 @@ wire_api = "chat"
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.output_format.as_deref(), Some("reasoning_content"));
     }
+
+    #[test]
+    fn test_route_mode_responses_bypasses_chat_conversion() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.deepseek.com/v1",
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek-v4", "routeMode": "responses" },
+                    { "model": "kimi-k2" }
+                ]
+            }
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        
+        // deepseek-v4 has routeMode=responses, should NOT convert
+        let body_with_responses_model = json!({ "model": "deepseek-v4" });
+        assert!(!should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses",
+            &body_with_responses_model
+        ));
+        
+        // kimi-k2 has no routeMode, should convert (provider default)
+        let body_with_chat_model = json!({ "model": "kimi-k2" });
+        assert!(should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses",
+            &body_with_chat_model
+        ));
+    }
+
+    #[test]
+    fn test_route_mode_chat_forces_conversion() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.openai.com/v1",
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "routeMode": "chat" }
+                ]
+            }
+        }));
+        // Provider does NOT use chat completions (base_url is not /chat/completions)
+        // But model has routeMode=chat, should still convert
+        let body = json!({ "model": "gpt-5.5" });
+        assert!(should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses",
+            &body
+        ));
+    }
+
 }
