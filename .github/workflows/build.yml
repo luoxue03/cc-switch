@@ -9,64 +9,93 @@ on:
 
 jobs:
   build:
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-          - platform: macos-latest
-            target: x86_64-apple-darwin
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-
-    runs-on: ${{ matrix.platform }}
+          - os: windows-2022
+          - os: ubuntu-22.04
+          - os: macos-14
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.85.0
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install dependencies (Ubuntu)
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
         run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl wget file patchelf \
+            libssl-dev rpm flatpak flatpak-builder elfutils xdg-utils \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
-      - name: Install frontend dependencies
-        run: pnpm install
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
         with:
-          args: --target ${{ matrix.target }}
+          version: 10.12.3
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri App (macOS Universal)
+        if: runner.os == 'macOS'
+        run: pnpm tauri build --target universal-apple-darwin
+
+      - name: Build Tauri App (Windows)
+        if: runner.os == 'Windows'
+        run: pnpm tauri build
+
+      - name: Build Tauri App (Linux)
+        if: runner.os == 'Linux'
+        run: pnpm tauri build --bundles appimage,deb,rpm
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: cc-switch-${{ matrix.target }}
+          name: cc-switch-${{ runner.os }}-${{ runner.arch }}
           path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/**/*.app
+            src-tauri/target/universal-apple-darwin/release/bundle/**/*.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
+            src-tauri/target/release/bundle/**/*.AppImage
           if-no-files-found: warn
