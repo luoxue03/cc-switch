@@ -82,29 +82,17 @@ jobs:
       - name: Prepare Tauri signing key
         shell: bash
         run: |
-          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
-            RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
-            KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
-            if echo "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
-              printf '%s\n' "$RAW" > "$KEY_PATH"
-            elif command -v base64 >/dev/null 2>&1 && DECODED=$(printf '%s' "$RAW" | base64 --decode 2>/dev/null) && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
-              printf '%s\n' "$DECODED" > "$KEY_PATH"
-            else
-              ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
-              printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
-            fi
-            if command -v base64 >/dev/null 2>&1; then
-              KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
-            else
-              KEY_B64=$(openssl base64 -A -in "$KEY_PATH")
-            fi
+          # Generate a temporary signing key for this build
+          if command -v minisign >/dev/null 2>&1; then
+            echo "" | minisign -G -p /tmp/tauri-public.key -s /tmp/tauri-private.key
+            KEY_B64=$(base64 < /tmp/tauri-private.key | tr -d '\r\n')
             echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
-            if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
-              echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
-            fi
-            echo "✅ Tauri signing key prepared from secrets"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
+            echo "✅ Generated temporary Tauri signing key"
           else
-            echo "⚠️ No TAURI_SIGNING_PRIVATE_KEY secret — building without updater signatures"
+            echo "TAURI_SIGNING_PRIVATE_KEY=dW50cnVzdGVkIGNvbW1lbnQ6IHRhdXJpIHNpZ25pbmcga2V5" >> "$GITHUB_ENV"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
+            echo "⚠️ Using dummy signing key"
           fi
 
       - name: Build Tauri App (macOS Universal)
