@@ -79,22 +79,6 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      - name: Prepare Tauri signing key
-        shell: bash
-        run: |
-          # Generate a temporary signing key for this build
-          if command -v minisign >/dev/null 2>&1; then
-            echo "" | minisign -G -p /tmp/tauri-public.key -s /tmp/tauri-private.key
-            KEY_B64=$(base64 < /tmp/tauri-private.key | tr -d '\r\n')
-            echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
-            echo "✅ Generated temporary Tauri signing key"
-          else
-            echo "TAURI_SIGNING_PRIVATE_KEY=" >> "$GITHUB_ENV"
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
-            echo "⚠️ Using dummy signing key"
-          fi
-
       - name: Build Tauri App (macOS Universal)
         if: runner.os == 'macOS'
         shell: bash
@@ -129,32 +113,40 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${GITHUB_REF_NAME//\//-}"
 
-          TAR_GZ=""; APP_PATH=""
+          TAR_GZ=""; APP_PATH=""; DMG_PATH=""
           for path in \
+            "src-tauri/target/universal-apple-darwin/release/bundle/dmg" \
             "src-tauri/target/universal-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" \
             "src-tauri/target/aarch64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg" \
             "src-tauri/target/x86_64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/release/bundle/dmg" \
             "src-tauri/target/release/bundle/macos"; do
             if [ -d "$path" ]; then
               [ -z "$TAR_GZ" ]   && TAR_GZ=$(find "$path" -maxdepth 1 -name "*.tar.gz" -type f | head -1 || true)
               [ -z "$APP_PATH" ] && APP_PATH=$(find "$path" -maxdepth 1 -name "*.app" -type d | head -1 || true)
+              [ -z "$DMG_PATH" ] && DMG_PATH=$(find "$path" -maxdepth 1 -name "*.dmg" -type f | head -1 || true)
             fi
           done
 
-          if [ -z "$TAR_GZ" ]; then
-            echo "❌ No macOS .tar.gz updater artifact found" >&2
-            exit 1
-          fi
           if [ -z "$APP_PATH" ]; then
             echo "❌ No .app found" >&2
             exit 1
           fi
 
           NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
-          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
-          [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found"
+          if [ -n "$TAR_GZ" ]; then
+            cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+            [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found"
+          fi
+
+          if [ -n "$DMG_PATH" ]; then
+            NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
+            cp "$DMG_PATH" "release-assets/$NEW_DMG"
+          fi
 
           NEW_ZIP="CC-Switch-${VERSION}-macOS.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
@@ -166,7 +158,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
-          $VERSION = $env:GITHUB_REF_NAME
+          $VERSION = $env:GITHUB_REF_NAME -replace '/', '-'
           $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle/msi' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($null -eq $msi) {
             $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -207,7 +199,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${GITHUB_REF_NAME//\//-}"
           ARCH="${{ matrix.arch || 'x86_64' }}"
           APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
           if [ -n "$APPIMAGE" ]; then
