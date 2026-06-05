@@ -1,21 +1,29 @@
-name: Build CC Switch
+name: Release
 
 on:
   push:
-    branches: [ feature/**, main ]
-  pull_request:
-    branches: [ main ]
+    branches: [ feature/** ]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  release:
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
         include:
           - os: windows-2022
           - os: ubuntu-22.04
+          - os: ubuntu-22.04-arm
+            arch: arm64
           - os: macos-14
 
     steps:
@@ -71,9 +79,53 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare Tauri signing key
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+            KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
+            if echo "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
+              printf '%s\n' "$RAW" > "$KEY_PATH"
+            elif command -v base64 >/dev/null 2>&1 && DECODED=$(printf '%s' "$RAW" | base64 --decode 2>/dev/null) && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
+              printf '%s\n' "$DECODED" > "$KEY_PATH"
+            else
+              ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
+              printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
+            fi
+            if command -v base64 >/dev/null 2>&1; then
+              KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
+            else
+              KEY_B64=$(openssl base64 -A -in "$KEY_PATH")
+            fi
+            echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
+            if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+              echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+            fi
+            echo "✅ Tauri signing key prepared from secrets"
+          else
+            echo "⚠️ No TAURI_SIGNING_PRIVATE_KEY secret — building without updater signatures"
+          fi
+
       - name: Build Tauri App (macOS Universal)
         if: runner.os == 'macOS'
-        run: pnpm tauri build --target universal-apple-darwin
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "=== macOS build attempt ${attempt}/${max_attempts} ==="
+            if pnpm tauri build --target universal-apple-darwin; then
+              echo "✅ macOS build succeeded"
+              exit 0
+            fi
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "❌ macOS build failed after ${max_attempts} attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 60))
+          done
 
       - name: Build Tauri App (Windows)
         if: runner.os == 'Windows'
@@ -83,19 +135,139 @@ jobs:
         if: runner.os == 'Linux'
         run: pnpm tauri build --bundles appimage,deb,rpm
 
-      - name: Upload artifacts
+      - name: Prepare macOS Assets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-assets
+          VERSION="${GITHUB_REF_NAME}"
+
+          TAR_GZ=""; APP_PATH=""
+          for path in \
+            "src-tauri/target/universal-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/aarch64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/x86_64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/release/bundle/macos"; do
+            if [ -d "$path" ]; then
+              [ -z "$TAR_GZ" ]   && TAR_GZ=$(find "$path" -maxdepth 1 -name "*.tar.gz" -type f | head -1 || true)
+              [ -z "$APP_PATH" ] && APP_PATH=$(find "$path" -maxdepth 1 -name "*.app" -type d | head -1 || true)
+            fi
+          done
+
+          if [ -z "$TAR_GZ" ]; then
+            echo "❌ No macOS .tar.gz updater artifact found" >&2
+            exit 1
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ No .app found" >&2
+            exit 1
+          fi
+
+          NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
+          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+          [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found"
+
+          NEW_ZIP="CC-Switch-${VERSION}-macOS.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
+          echo "✅ macOS assets prepared"
+
+      - name: Prepare Windows Assets
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $VERSION = $env:GITHUB_REF_NAME
+          $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle/msi' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $msi) {
+            $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if ($null -ne $msi) {
+            $dest = "CC-Switch-$VERSION-Windows.msi"
+            Copy-Item $msi.FullName (Join-Path release-assets $dest)
+            Write-Host "Installer copied: $dest"
+            $sigPath = "$($msi.FullName).sig"
+            if (Test-Path $sigPath) {
+              Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
+              Write-Host "Signature copied: $dest.sig"
+            }
+          } else {
+            Write-Warning 'No Windows MSI installer found'
+          }
+          $exeCandidates = @(
+            'src-tauri/target/release/cc-switch.exe',
+            'src-tauri/target/x86_64-pc-windows-msvc/release/cc-switch.exe'
+          )
+          $exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($null -ne $exePath) {
+            $portableDir = 'release-assets/CC-Switch-Portable'
+            New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+            Copy-Item $exePath $portableDir
+            $portableIniPath = Join-Path $portableDir 'portable.ini'
+            $portableContent = @('# CC Switch portable build marker', 'portable=true')
+            $portableContent | Set-Content -Path $portableIniPath -Encoding UTF8
+            $portableZip = "release-assets/CC-Switch-$VERSION-Windows-Portable.zip"
+            Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
+            Remove-Item -Recurse -Force $portableDir
+            Write-Host "Windows portable zip created"
+          }
+
+      - name: Prepare Linux Assets
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-assets
+          VERSION="${GITHUB_REF_NAME}"
+          ARCH="${{ matrix.arch || 'x86_64' }}"
+          APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
+          if [ -n "$APPIMAGE" ]; then
+            NEW_APPIMAGE="CC-Switch-${VERSION}-Linux-${ARCH}.AppImage"
+            cp "$APPIMAGE" "release-assets/$NEW_APPIMAGE"
+            [ -f "$APPIMAGE.sig" ] && cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig" || echo ".sig for AppImage not found"
+          fi
+          DEB=$(find src-tauri/target/release/bundle -name "*.deb" | head -1 || true)
+          [ -n "$DEB" ] && cp "$DEB" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.deb"
+          RPM=$(find src-tauri/target/release/bundle -name "*.rpm" | head -1 || true)
+          [ -n "$RPM" ] && cp "$RPM" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.rpm"
+
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: cc-switch-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
-            src-tauri/target/universal-apple-darwin/release/bundle/**/*.app
-            src-tauri/target/universal-apple-darwin/release/bundle/**/*.tar.gz
-            src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.dmg
-            src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.rpm
-            src-tauri/target/release/bundle/**/*.AppImage
-          if-no-files-found: warn
+          name: release-assets-${{ runner.os }}-${{ matrix.arch || runner.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-22.04
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download built release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CC Switch ${{ github.ref_name }}
+          prerelease: true
+          body: |
+            ## CC Switch ${{ github.ref_name }} (route-mode fork)
+
+            ### Downloads
+
+            - **macOS**: `.dmg` or `.zip` (unsigned — right-click → Open to bypass Gatekeeper)
+            - **Windows**: `.msi` (installer) or `Portable.zip`
+            - **Linux**: `.AppImage` / `.deb` / `.rpm`
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
