@@ -249,6 +249,7 @@ export interface CodexCatalogModel {
   model: string;
   displayName?: string;
   contextWindow?: string | number;
+  routeMode?: "chat" | "responses";
 }
 
 // Claude 认证字段类型

@@ -1297,7 +1297,11 @@ impl RequestForwarder {
             None => adapter.needs_transform(provider),
         };
         let codex_responses_to_chat = matches!(app_type, AppType::Codex)
-            && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
+            && super::providers::should_convert_codex_responses_to_chat(
+                provider,
+                endpoint,
+                &mapped_body,
+            );
         let (effective_endpoint, passthrough_query) = if codex_responses_to_chat {
             rewrite_codex_responses_endpoint_to_chat(endpoint)
         } else if needs_transform && adapter.name() == "Claude" {
