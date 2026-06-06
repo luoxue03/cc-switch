@@ -164,11 +164,16 @@ export const normalizeCodexCatalogModelsForSave = (
     const contextWindow = rawContextWindow
       ? Number.parseInt(rawContextWindow, 10)
       : undefined;
+    const routeMode =
+      item.routeMode === "chat" || item.routeMode === "responses"
+        ? item.routeMode
+        : undefined;
 
     normalized.push({
       model,
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
+      ...(routeMode ? { routeMode } : {}),
     });
   }
 
@@ -1187,7 +1192,7 @@ function ProviderFormFull({
             ? setCodexWireApi(codexConfig ?? "", "responses")
             : (codexConfig ?? "");
         const normalizedCatalogModels =
-          category !== "official" && localCodexApiFormat === "openai_chat"
+          category !== "official"
             ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
             : [];
         // Sync first catalog row's model into config.toml so Codex uses it as default
@@ -1383,7 +1388,8 @@ function ProviderFormFull({
       codexChatReasoning:
         appId === "codex" &&
         category !== "official" &&
-        localCodexApiFormat === "openai_chat"
+        (localCodexApiFormat === "openai_chat" ||
+          codexCatalogModels.some((model) => model.routeMode === "chat"))
           ? normalizeCodexChatReasoningForSave(codexChatReasoning)
           : undefined,
       testConfig: testConfig.enabled ? testConfig : undefined,
