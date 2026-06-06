@@ -169,6 +169,10 @@ export const normalizeCodexCatalogModelsForSave = (
     const contextWindow = rawContextWindow
       ? Number.parseInt(rawContextWindow, 10)
       : undefined;
+    const routeMode =
+      item.routeMode === "chat" || item.routeMode === "responses"
+        ? item.routeMode
+        : undefined;
 
     const inputModalities = item.inputModalities?.filter(
       (m) => typeof m === "string" && m.trim(),
@@ -188,6 +192,7 @@ export const normalizeCodexCatalogModelsForSave = (
         ? { inputModalities }
         : {}),
       ...(baseInstructions ? { baseInstructions } : {}),
+      ...(routeMode ? { routeMode } : {}),
     });
   }
 
@@ -1472,7 +1477,8 @@ function ProviderFormFull({
       codexChatReasoning:
         appId === "codex" &&
         category !== "official" &&
-        localCodexApiFormat === "openai_chat"
+        (localCodexApiFormat === "openai_chat" ||
+          codexCatalogModels.some((model) => model.routeMode === "chat"))
           ? normalizeCodexChatReasoningForSave(codexChatReasoning)
           : undefined,
       customUserAgent:

@@ -710,6 +710,7 @@ pub async fn handle_responses(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let body_for_route_mode = body.clone();
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -739,7 +740,11 @@ pub async fn handle_responses(
     ctx.provider = result.provider;
     let response = result.response;
 
-    if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
+    if super::providers::should_convert_codex_responses_to_chat(
+        &ctx.provider,
+        &endpoint,
+        &body_for_route_mode,
+    ) {
         return handle_codex_chat_to_responses_transform(
             response,
             &ctx,
@@ -789,6 +794,7 @@ pub async fn handle_responses_compact(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let body_for_route_mode = body.clone();
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -818,7 +824,11 @@ pub async fn handle_responses_compact(
     ctx.provider = result.provider;
     let response = result.response;
 
-    if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
+    if super::providers::should_convert_codex_responses_to_chat(
+        &ctx.provider,
+        &endpoint,
+        &body_for_route_mode,
+    ) {
         return handle_codex_chat_to_responses_transform(
             response,
             &ctx,

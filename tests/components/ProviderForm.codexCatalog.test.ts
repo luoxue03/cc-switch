@@ -9,10 +9,14 @@ describe("ProviderForm Codex catalog helpers", () => {
         { model: "deepseek-v4-flash", displayName: "Duplicate" },
         { model: "", displayName: "Empty" },
         { model: "kimi-k2", contextWindow: "128000 tokens" },
+        { model: " gpt-5.5 ", routeMode: "responses" },
+        { model: " deepseek-v4-pro ", routeMode: "chat" },
       ]),
     ).toEqual([
       { model: "deepseek-v4-flash", displayName: "DeepSeek" },
       { model: "kimi-k2", contextWindow: 128000 },
+      { model: "gpt-5.5", routeMode: "responses" },
+      { model: "deepseek-v4-pro", routeMode: "chat" },
     ]);
   });
 

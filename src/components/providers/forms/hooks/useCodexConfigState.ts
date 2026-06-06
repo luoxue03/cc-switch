@@ -88,6 +88,13 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
                 : typeof item?.base_instructions === "string"
                   ? item.base_instructions
                   : undefined;
+            const routeMode =
+              item?.routeMode === "chat" || item?.routeMode === "responses"
+                ? item.routeMode
+                : item?.route_mode === "chat" ||
+                    item?.route_mode === "responses"
+                  ? item.route_mode
+                  : undefined;
             return {
               model: typeof item?.model === "string" ? item.model : "",
               displayName:
@@ -109,6 +116,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
                 : {}),
               ...(inputModalities ? { inputModalities } : {}),
               ...(baseInstructions ? { baseInstructions } : {}),
+              ...(routeMode ? { routeMode } : {}),
             };
           })
           .filter((item: CodexCatalogModel) => item.model.trim()),
