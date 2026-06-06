@@ -82,6 +82,13 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
                     typeof item?.context_window === "number"
                   ? item.context_window
                   : "",
+            routeMode:
+              item?.routeMode === "chat" || item?.routeMode === "responses"
+                ? item.routeMode
+                : item?.route_mode === "chat" ||
+                    item?.route_mode === "responses"
+                  ? item.route_mode
+                  : undefined,
           }))
           .filter((item: CodexCatalogModel) => item.model.trim()),
       );

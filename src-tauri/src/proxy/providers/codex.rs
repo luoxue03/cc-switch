@@ -91,19 +91,12 @@ pub fn should_convert_codex_responses_to_chat(
         return false;
     }
     
+    if let Some(uses_chat) = codex_model_route_mode_uses_chat(provider, body) {
+        return uses_chat;
+    }
+
     if !codex_provider_uses_chat_completions(provider) {
         return false;
-    }
-    
-    // Check model-level route mode override
-    if let Some(model) = body.get("model").and_then(|v| v.as_str()) {
-        if let Some(route_mode) = get_model_route_mode(provider, model) {
-            return match route_mode.as_str() {
-                "responses" => false, // Force native Responses
-                "chat" => true,       // Force Chat Completions bridge
-                _ => true,            // Default to provider behavior
-            };
-        }
     }
     
     // No override, use provider default
@@ -168,13 +161,24 @@ fn get_model_route_mode(provider: &Provider, model: &str) -> Option<String> {
     None
 }
 
+fn codex_model_route_mode_uses_chat(provider: &Provider, body: &JsonValue) -> Option<bool> {
+    let model = body.get("model").and_then(|v| v.as_str())?;
+    match get_model_route_mode(provider, model)?.as_str() {
+        "chat" => Some(true),
+        "responses" => Some(false),
+        _ => None,
+    }
+}
+
 /// For Codex Chat providers, ensure the request uses the configured upstream
 /// model before converting the request to Chat Completions.
 pub fn apply_codex_chat_upstream_model(
     provider: &Provider,
     body: &mut JsonValue,
 ) -> Option<String> {
-    if !codex_provider_uses_chat_completions(provider) {
+    let route_uses_chat = codex_model_route_mode_uses_chat(provider, body)
+        .unwrap_or_else(|| codex_provider_uses_chat_completions(provider));
+    if !route_uses_chat {
         return None;
     }
 
@@ -1046,6 +1050,50 @@ wire_api = "chat"
             "/v1/responses",
             &body
         ));
+    }
+
+    #[test]
+    fn test_route_mode_supports_mixed_axonhub_models() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1",
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek4pro", "routeMode": "chat" },
+                    { "model": "gpt5.5", "routeMode": "responses" }
+                ]
+            }
+        }));
+
+        assert!(should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses",
+            &json!({ "model": "deepseek4pro" })
+        ));
+        assert!(!should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses",
+            &json!({ "model": "gpt5.5" })
+        ));
+    }
+
+    #[test]
+    fn test_route_mode_chat_allows_upstream_model_selection_for_responses_provider() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1",
+            "model": "gpt5.5",
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek4pro", "routeMode": "chat" },
+                    { "model": "gpt5.5", "routeMode": "responses" }
+                ]
+            }
+        }));
+        let mut body = json!({ "model": "deepseek4pro", "input": "ping" });
+
+        let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("deepseek4pro"));
+        assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("deepseek4pro"));
     }
 
 }

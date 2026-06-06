@@ -3,6 +3,13 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
   Collapsible,
@@ -82,13 +89,19 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
     model: seed?.model ?? "",
     displayName: seed?.displayName ?? "",
     contextWindow: seed?.contextWindow ?? "",
+    routeMode: seed?.routeMode,
   };
 }
 
 // Compares rows (with rowId) to incoming models (without) by data fields only,
 // so both sync effects can use the same equality definition.
 function catalogRowsMatchModels(
-  rows: Array<Pick<CodexCatalogRow, "model" | "displayName" | "contextWindow">>,
+  rows: Array<
+    Pick<
+      CodexCatalogRow,
+      "model" | "displayName" | "contextWindow" | "routeMode"
+    >
+  >,
   models: CodexCatalogModel[],
 ): boolean {
   if (rows.length !== models.length) return false;
@@ -97,7 +110,9 @@ function catalogRowsMatchModels(
     return (
       row.model === (incoming.model ?? "") &&
       (row.displayName ?? "") === (incoming.displayName ?? "") &&
-      String(row.contextWindow ?? "") === String(incoming.contextWindow ?? "")
+      String(row.contextWindow ?? "") ===
+        String(incoming.contextWindow ?? "") &&
+      (row.routeMode ?? "") === (incoming.routeMode ?? "")
     );
   });
 }
@@ -137,6 +152,7 @@ export function CodexFormFields({
   const needsLocalRouting = apiFormat === "openai_chat";
   const canEditCatalog = Boolean(onCatalogModelsChange);
   const canEditReasoning = Boolean(onCodexChatReasoningChange);
+  const showModelCatalog = shouldShowSpeedTest && canEditCatalog;
   const supportsThinking =
     codexChatReasoning.supportsThinking === true ||
     codexChatReasoning.supportsEffort === true;
@@ -145,6 +161,10 @@ export function CodexFormFields({
   const [catalogRows, setCatalogRows] = useState<CodexCatalogRow[]>(() =>
     catalogModels.map((m) => createCatalogRow(m)),
   );
+  const hasChatRouteOverride = catalogRows.some(
+    (row) => row.routeMode === "chat",
+  );
+  const usesChatRouting = needsLocalRouting || hasChatRouteOverride;
 
   // 记录上次发送给父组件的数据，避免重复触发
   const lastSentModelsRef = useRef<CodexCatalogModel[]>(catalogModels);
@@ -353,7 +373,7 @@ export function CodexFormFields({
         </div>
       )}
 
-      {needsLocalRouting && canEditReasoning && (
+      {usesChatRouting && canEditReasoning && (
         <Collapsible
           open={reasoningExpanded}
           onOpenChange={setReasoningExpanded}
@@ -434,8 +454,8 @@ export function CodexFormFields({
         </Collapsible>
       )}
 
-      {/* Codex 模型映射 —— 仅在本地路由 + 可编辑时显示 */}
-      {needsLocalRouting && canEditCatalog && (
+      {/* Codex 模型映射 —— 第三方供应商可按模型覆盖 Chat / Responses 路由 */}
+      {showModelCatalog && (
         <div className="space-y-4 rounded-lg border border-border-default p-4">
           <div className="space-y-1">
             <div className="flex items-center justify-between gap-3">
@@ -462,7 +482,7 @@ export function CodexFormFields({
           {catalogRows.length > 0 && (
             <div className="space-y-2">
               {/* 列头：md+ 显示 */}
-              <div className="hidden grid-cols-[1fr_1fr_140px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+              <div className="hidden grid-cols-[1fr_1fr_140px_150px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                 <span>
                   {t("codexConfig.catalogColumnDisplay", {
                     defaultValue: "菜单显示名",
@@ -478,13 +498,18 @@ export function CodexFormFields({
                     defaultValue: "上下文窗口",
                   })}
                 </span>
+                <span>
+                  {t("codexConfig.catalogColumnRouteMode", {
+                    defaultValue: "路由模式",
+                  })}
+                </span>
                 <span />
               </div>
 
               {catalogRows.map((row, index) => (
                 <div
                   key={row.rowId}
-                  className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_140px_36px]"
+                  className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_140px_150px_36px]"
                 >
                   <Input
                     value={row.displayName ?? ""}
@@ -550,6 +575,42 @@ export function CodexFormFields({
                       defaultValue: "上下文窗口",
                     })}
                   />
+                  <Select
+                    value={row.routeMode ?? "default"}
+                    onValueChange={(value) =>
+                      handleUpdateCatalogRow(index, {
+                        routeMode:
+                          value === "chat" || value === "responses"
+                            ? value
+                            : undefined,
+                      })
+                    }
+                  >
+                    <SelectTrigger
+                      aria-label={t("codexConfig.catalogColumnRouteMode", {
+                        defaultValue: "路由模式",
+                      })}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">
+                        {t("codexConfig.routeModeDefault", {
+                          defaultValue: "默认",
+                        })}
+                      </SelectItem>
+                      <SelectItem value="chat">
+                        {t("codexConfig.routeModeChat", {
+                          defaultValue: "转 Chat",
+                        })}
+                      </SelectItem>
+                      <SelectItem value="responses">
+                        {t("codexConfig.routeModeResponses", {
+                          defaultValue: "走 Responses",
+                        })}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                   <Button
                     type="button"
                     variant="ghost"
