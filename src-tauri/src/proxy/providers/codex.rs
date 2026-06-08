@@ -103,6 +103,48 @@ pub fn should_convert_codex_responses_to_chat(
     true
 }
 
+pub fn sanitize_codex_responses_passthrough_body(body: &mut JsonValue) {
+    let Some(input) = body.get_mut("input").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+
+    input.retain(|item| !is_invalid_codex_responses_tool_history_item(item));
+}
+
+fn is_invalid_codex_responses_tool_history_item(item: &JsonValue) -> bool {
+    let item_type = item.get("type").and_then(|value| value.as_str());
+    let is_tool_call = matches!(
+        item_type,
+        Some("function_call") | Some("custom_tool_call") | Some("tool_search_call")
+    );
+    let is_tool_output = matches!(
+        item_type,
+        Some("function_call_output") | Some("custom_tool_call_output") | Some("tool_search_output")
+    );
+
+    if !is_tool_call && !is_tool_output {
+        return false;
+    }
+
+    let has_valid_call_id = item
+        .get("call_id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_valid_call_id {
+        return true;
+    }
+
+    if matches!(item_type, Some("function_call") | Some("custom_tool_call")) {
+        let has_valid_name = item
+            .get("name")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty());
+        return !has_valid_name;
+    }
+
+    false
+}
+
 /// Extract the real upstream model configured for a Codex provider.
 pub fn codex_provider_upstream_model(provider: &Provider) -> Option<String> {
     provider
@@ -1094,6 +1136,30 @@ wire_api = "chat"
 
         assert_eq!(upstream_model.as_deref(), Some("deepseek4pro"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("deepseek4pro"));
+    }
+
+    #[test]
+    fn test_sanitize_codex_responses_passthrough_drops_invalid_tool_history() {
+        let mut body = json!({
+            "model": "gpt5.5",
+            "input": [
+                { "role": "user", "content": "hi" },
+                { "type": "function_call", "call_id": "", "name": "exec_command", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "", "output": "unsupported call: " },
+                { "type": "function_call", "call_id": "call_ok", "name": "", "arguments": "{}" },
+                { "type": "function_call", "call_id": "call_read", "name": "read_file", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_read", "output": "ok" }
+            ]
+        });
+
+        sanitize_codex_responses_passthrough_body(&mut body);
+
+        let input = body.get("input").and_then(|value| value.as_array()).unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["content"], "hi");
+        assert_eq!(input[1]["call_id"], "call_read");
+        assert_eq!(input[1]["name"], "read_file");
+        assert_eq!(input[2]["call_id"], "call_read");
     }
 
 }
