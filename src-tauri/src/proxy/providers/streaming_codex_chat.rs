@@ -410,6 +410,8 @@ impl ChatToResponsesState {
         let name_delta = function
             .get("name")
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
             .map(str::to_string);
         let args_delta = function
             .get("arguments")
@@ -441,7 +443,7 @@ impl ChatToResponsesState {
                 }
             }
 
-            if !state.added && (!state.call_id.is_empty() || !state.name.is_empty()) {
+            if !state.added && !state.name.is_empty() {
                 should_add = true;
                 pending_arguments = state.arguments.clone();
             } else if state.added {
@@ -1075,6 +1077,39 @@ mod tests {
         assert!(output.contains("event: response.function_call_arguments.done"));
         assert!(output.contains("\"type\":\"function_call\""));
         assert!(output.contains("\"call_id\":\"call_1\""));
+    }
+
+    #[tokio::test]
+    async fn keeps_streamed_tool_name_when_later_chunks_send_empty_name() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_empty_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_empty_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("\"type\":\"function_call\""));
+        assert!(output.contains("\"call_id\":\"call_1\""));
+        assert!(output.contains("\"name\":\"read_file\""));
+        assert!(!output.contains("\"name\":\"\""));
+        assert!(!output.contains("unknown_tool"));
+    }
+
+    #[tokio::test]
+    async fn waits_for_non_empty_tool_name_before_adding_streamed_tool_item() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_late_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_late_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_late_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read_file\",\"arguments\":\"\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("\"type\":\"function_call\""));
+        assert!(output.contains("\"call_id\":\"call_1\""));
+        assert!(output.contains("\"name\":\"read_file\""));
+        assert!(output.contains(r#""arguments":"{\"path\":\"README.md\"}""#));
+        assert!(!output.contains("unknown_tool"));
     }
 
     #[tokio::test]
