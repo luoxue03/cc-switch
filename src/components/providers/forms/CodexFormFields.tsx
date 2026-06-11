@@ -606,7 +606,7 @@ export function CodexFormFields({
                       </SelectItem>
                       <SelectItem value="responses">
                         {t("codexConfig.routeModeResponses", {
-                          defaultValue: "走 Responses",
+                          defaultValue: "Responses",
                         })}
                       </SelectItem>
                     </SelectContent>
