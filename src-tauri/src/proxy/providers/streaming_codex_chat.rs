@@ -411,6 +411,8 @@ impl ChatToResponsesState {
         let name_delta = function
             .get("name")
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
             .map(str::to_string);
         let args_delta = function
             .get("arguments")
@@ -1127,6 +1129,26 @@ mod tests {
         assert!(output.contains("event: response.function_call_arguments.done"));
         assert!(output.contains("\"type\":\"function_call\""));
         assert!(output.contains("\"call_id\":\"call_1\""));
+    }
+
+    #[tokio::test]
+    async fn ignores_empty_streamed_tool_name_without_hiding_tool_or_reasoning() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_empty_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need file.\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_empty_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_empty_name\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("event: response.output_item.added"));
+        assert!(output.contains("event: response.output_item.done"));
+        assert!(output.contains("\"type\":\"function_call\""));
+        assert!(output.contains("\"call_id\":\"call_1\""));
+        assert!(output.contains("\"name\":\"read_file\""));
+        assert!(output.contains("\"reasoning_content\":\"Need file.\""));
+        assert!(!output.contains("\"name\":\"\""));
+        assert!(!output.contains("unsupported call"));
     }
 
     #[tokio::test]
