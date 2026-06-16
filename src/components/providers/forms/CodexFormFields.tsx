@@ -653,9 +653,12 @@ export function CodexFormFields({
                           }
                         >
                           <SelectTrigger
-                            aria-label={t("codexConfig.catalogColumnRouteMode", {
-                              defaultValue: "路由模式",
-                            })}
+                            aria-label={t(
+                              "codexConfig.catalogColumnRouteMode",
+                              {
+                                defaultValue: "路由模式",
+                              },
+                            )}
                           >
                             <SelectValue />
                           </SelectTrigger>
