@@ -821,6 +821,7 @@ async fn handle_responses_for_app(
     // {namespace, name} map used to restore the native Responses upstream's
     // function-call names (see the namespace-restore dispatch below).
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
+    let body_for_route_mode = body.clone();
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -850,7 +851,11 @@ async fn handle_responses_for_app(
     ctx.provider = result.provider;
     let response = result.response;
 
-    if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
+    if super::providers::should_convert_codex_responses_to_anthropic(
+        &ctx.provider,
+        &endpoint,
+        &body_for_route_mode,
+    ) {
         return handle_codex_anthropic_to_responses_transform(
             response,
             &ctx,
@@ -862,7 +867,11 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
+    if super::providers::should_convert_codex_responses_to_chat(
+        &ctx.provider,
+        &endpoint,
+        &body_for_route_mode,
+    ) {
         return handle_codex_chat_to_responses_transform(
             response,
             &ctx,
@@ -955,6 +964,7 @@ async fn handle_responses_compact_for_app(
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
+    let body_for_route_mode = body.clone();
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -984,7 +994,11 @@ async fn handle_responses_compact_for_app(
     ctx.provider = result.provider;
     let response = result.response;
 
-    if super::providers::should_convert_codex_responses_to_anthropic(&ctx.provider, &endpoint) {
+    if super::providers::should_convert_codex_responses_to_anthropic(
+        &ctx.provider,
+        &endpoint,
+        &body_for_route_mode,
+    ) {
         return handle_codex_anthropic_to_responses_transform(
             response,
             &ctx,
@@ -996,7 +1010,11 @@ async fn handle_responses_compact_for_app(
         .await;
     }
 
-    if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
+    if super::providers::should_convert_codex_responses_to_chat(
+        &ctx.provider,
+        &endpoint,
+        &body_for_route_mode,
+    ) {
         return handle_codex_chat_to_responses_transform(
             response,
             &ctx,

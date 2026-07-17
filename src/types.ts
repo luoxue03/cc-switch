@@ -269,6 +269,7 @@ export interface CodexCatalogModel {
   // Codex requires this field in every catalog entry; when omitted the backend
   // falls back to a neutral default. e.g. MiMo "developed by Xiaomi".
   baseInstructions?: string;
+  routeMode?: "chat" | "responses" | "anthropic";
 }
 
 // Claude 认证字段类型

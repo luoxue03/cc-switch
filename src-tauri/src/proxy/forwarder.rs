@@ -1146,9 +1146,11 @@ impl RequestForwarder {
         // below must be skipped on the Anthropic path (the marker has to survive to
         // catalog matching and to the transform's own strip+beta detection).
         let codex_responses_to_chat = matches!(app_type, AppType::Codex | AppType::GrokBuild)
-            && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
+            && super::providers::should_convert_codex_responses_to_chat(provider, endpoint, &body);
         let codex_responses_to_anthropic = matches!(app_type, AppType::Codex | AppType::GrokBuild)
-            && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
+            && super::providers::should_convert_codex_responses_to_anthropic(
+                provider, endpoint, &body,
+            );
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
             && super::providers::is_codex_official_provider(provider);
 
@@ -1527,6 +1529,10 @@ impl RequestForwarder {
                 adapter.transform_request(mapped_body, provider)?
             }
         } else {
+            let mut mapped_body = mapped_body;
+            if matches!(app_type, AppType::Codex) {
+                super::providers::sanitize_codex_responses_passthrough_body(&mut mapped_body);
+            }
             mapped_body
         };
 

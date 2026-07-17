@@ -61,6 +61,7 @@ pub use codex::{
     inject_codex_chat_prompt_cache_key, is_codex_official_provider,
     provider_needs_responses_namespace_flatten, resolve_codex_catalog_tool_profile,
     resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_anthropic,
+    sanitize_codex_responses_passthrough_body,
     should_convert_codex_responses_to_chat,
 };
 pub use gemini::GeminiAdapter;
