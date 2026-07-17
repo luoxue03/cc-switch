@@ -9,10 +9,29 @@ describe("ProviderForm Codex catalog helpers", () => {
         { model: "deepseek-v4-flash", displayName: "Duplicate" },
         { model: "", displayName: "Empty" },
         { model: "kimi-k2", contextWindow: "128000 tokens" },
+        { model: " gpt-5.5 ", routeMode: "responses" },
+        { model: " claude-sonnet ", routeMode: "anthropic" },
       ]),
     ).toEqual([
-      { model: "deepseek-v4-flash", displayName: "DeepSeek" },
-      { model: "kimi-k2", contextWindow: 128000 },
+      {
+        model: "deepseek-v4-flash",
+        displayName: "DeepSeek",
+        routeMode: "responses",
+      },
+      { model: "kimi-k2", contextWindow: 128000, routeMode: "responses" },
+      { model: "gpt-5.5", routeMode: "responses" },
+      { model: "claude-sonnet", routeMode: "anthropic" },
+    ]);
+  });
+
+  it("uses the provider fallback route mode when rows do not specify one", () => {
+    expect(
+      normalizeCodexCatalogModelsForSave(
+        [{ model: " deepseek-v4-pro ", displayName: " DeepSeek " }],
+        "chat",
+      ),
+    ).toEqual([
+      { model: "deepseek-v4-pro", displayName: "DeepSeek", routeMode: "chat" },
     ]);
   });
 
@@ -45,8 +64,13 @@ describe("ProviderForm Codex catalog helpers", () => {
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
         baseInstructions: "You are Codex, a coding agent based on MiniMax-M3.",
+        routeMode: "responses",
       },
-      { model: "mimo-v2.5-pro", supportsParallelToolCalls: false },
+      {
+        model: "mimo-v2.5-pro",
+        supportsParallelToolCalls: false,
+        routeMode: "responses",
+      },
     ]);
   });
 });
