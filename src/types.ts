@@ -282,6 +282,7 @@ export interface CodexCatalogModel {
   // reasoningLevels; when omitted the backend keeps the template default if it
   // is still in the list, otherwise the highest declared level.
   defaultReasoningLevel?: string;
+  routeMode?: "chat" | "responses" | "anthropic";
 }
 
 // Claude 认证字段类型

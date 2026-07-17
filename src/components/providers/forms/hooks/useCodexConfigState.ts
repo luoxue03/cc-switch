@@ -66,6 +66,16 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
       : typeof item?.default_reasoning_level === "string"
         ? item.default_reasoning_level
         : undefined;
+  const routeMode =
+    item?.routeMode === "chat" ||
+    item?.routeMode === "responses" ||
+    item?.routeMode === "anthropic"
+      ? item.routeMode
+      : item?.route_mode === "chat" ||
+          item?.route_mode === "responses" ||
+          item?.route_mode === "anthropic"
+        ? item.route_mode
+        : undefined;
   return {
     model: typeof item?.model === "string" ? item.model : "",
     displayName:
@@ -91,6 +101,7 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
       ? { reasoningLevels }
       : {}),
     ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
+    ...(routeMode ? { routeMode } : {}),
   };
 };
 

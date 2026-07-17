@@ -153,8 +153,23 @@ function getPresetProviderType(
     : undefined;
 }
 
+const routeModeFromCodexApiFormat = (
+  apiFormat: CodexApiFormat,
+): NonNullable<CodexCatalogModel["routeMode"]> => {
+  switch (apiFormat) {
+    case "openai_chat":
+      return "chat";
+    case "anthropic":
+      return "anthropic";
+    case "openai_responses":
+    default:
+      return "responses";
+  }
+};
+
 export const normalizeCodexCatalogModelsForSave = (
   models: CodexCatalogModel[],
+  fallbackRouteMode: CodexCatalogModel["routeMode"] = "responses",
 ): CodexCatalogModel[] => {
   const seen = new Set<string>();
   const normalized: CodexCatalogModel[] = [];
@@ -172,6 +187,12 @@ export const normalizeCodexCatalogModelsForSave = (
     const contextWindow = rawContextWindow
       ? Number.parseInt(rawContextWindow, 10)
       : undefined;
+    const routeMode =
+      item.routeMode === "chat" ||
+      item.routeMode === "responses" ||
+      item.routeMode === "anthropic"
+        ? item.routeMode
+        : fallbackRouteMode;
 
     const inputModalities = item.inputModalities?.filter(
       (m) => typeof m === "string" && m.trim(),
@@ -199,6 +220,7 @@ export const normalizeCodexCatalogModelsForSave = (
         ? { reasoningLevels }
         : {}),
       ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
+      ...(routeMode ? { routeMode } : {}),
     });
   }
 
@@ -1516,7 +1538,10 @@ function ProviderFormFull({
         // 留空归一化为 [] 即不写。后端只看 modelCatalog.models 是否非空。
         const normalizedCatalogModels =
           category !== "official"
-            ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
+            ? normalizeCodexCatalogModelsForSave(
+                codexCatalogModels,
+                routeModeFromCodexApiFormat(localCodexApiFormat),
+              )
             : [];
         // The default-model field writes the top-level `model` into the TOML
         // as the user types; only when it was left empty fall back to the
