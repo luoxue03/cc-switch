@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeCodexCatalogModelsForSave } from "@/components/providers/forms/ProviderForm";
+import {
+  buildCodexRouteSettingsMeta,
+  normalizeCodexCatalogModelsForSave,
+} from "@/components/providers/forms/ProviderForm";
 
 describe("ProviderForm Codex catalog helpers", () => {
   it("normalizes catalog rows and removes empty or duplicate models", () => {
@@ -72,5 +75,51 @@ describe("ProviderForm Codex catalog helpers", () => {
         routeMode: "responses",
       },
     ]);
+  });
+
+  it("persists Chat and Anthropic settings together for the current Codex provider", () => {
+    expect(
+      buildCodexRouteSettingsMeta({
+        enabled: true,
+        chatReasoning: {
+          supportsThinking: true,
+          supportsEffort: true,
+          effortParam: "reasoning_effort",
+        },
+        promptCacheRouting: "enabled",
+        anthropicAuthField: "ANTHROPIC_API_KEY",
+        impersonateClaudeCode: true,
+        maxOutputTokens: "65536",
+      }),
+    ).toMatchObject({
+      codexChatReasoning: {
+        supportsThinking: true,
+        supportsEffort: true,
+        effortParam: "reasoning_effort",
+      },
+      promptCacheRouting: "enabled",
+      apiKeyField: "ANTHROPIC_API_KEY",
+      impersonateClaudeCode: true,
+      maxOutputTokens: 65536,
+    });
+  });
+
+  it("does not write Codex route settings for another app or an official provider", () => {
+    expect(
+      buildCodexRouteSettingsMeta({
+        enabled: false,
+        chatReasoning: { supportsThinking: true },
+        promptCacheRouting: "enabled",
+        anthropicAuthField: "ANTHROPIC_API_KEY",
+        impersonateClaudeCode: true,
+        maxOutputTokens: "65536",
+      }),
+    ).toEqual({
+      codexChatReasoning: undefined,
+      promptCacheRouting: undefined,
+      apiKeyField: undefined,
+      impersonateClaudeCode: undefined,
+      maxOutputTokens: undefined,
+    });
   });
 });

@@ -233,6 +233,17 @@ export function ProviderCard({
       provider.meta?.apiFormat === "anthropic"
     )
       return true;
+    const modelCatalog = (provider.settingsConfig as Record<string, any>)
+      ?.modelCatalog;
+    if (
+      Array.isArray(modelCatalog?.models) &&
+      modelCatalog.models.some((model: Record<string, unknown>) => {
+        const routeMode = model.routeMode ?? model.route_mode;
+        return routeMode === "chat" || routeMode === "anthropic";
+      })
+    ) {
+      return true;
+    }
     const config = (provider.settingsConfig as Record<string, any>)?.config;
     return (
       typeof config === "string" &&
@@ -243,6 +254,7 @@ export function ProviderCard({
     appId,
     provider.category,
     provider.meta?.apiFormat,
+    (provider.settingsConfig as Record<string, any>)?.modelCatalog,
     (provider.settingsConfig as Record<string, any>)?.config,
   ]);
   // 获取用量数据以判断是否有多套餐
