@@ -2108,6 +2108,21 @@ pub(crate) fn read_codex_model_catalog_text(path: &Path) -> Result<String, AppEr
     read_limited_string(path, MAX_CODEX_CATALOG_BYTES)
 }
 
+/// Read a user-selected Codex model catalog for an explicit UI import.
+pub fn read_codex_model_catalog_simplified_from_file(
+    catalog_path: &Path,
+) -> Result<Option<Value>, AppError> {
+    let config_text = read_codex_config_text()?;
+    if !catalog_path.exists() {
+        return Ok(None);
+    }
+    let catalog_text = read_limited_string(catalog_path, MAX_CODEX_CATALOG_BYTES)?;
+    Ok(build_simplified_catalog_from_texts(
+        &config_text,
+        &catalog_text,
+    ))
+}
+
 /// Given `config.toml` text, resolve the on-disk path of the cc-switch–owned
 /// catalog file (returns `None` if `model_catalog_json` is absent or points at
 /// a file we don't own). Relative paths are resolved under `base_dir`;
@@ -2194,6 +2209,8 @@ pub(crate) fn resolve_cc_switch_catalog_path(
 fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) -> Option<Value> {
     let catalog: Value = serde_json::from_str(catalog_text).ok()?;
     let models = catalog.get("models").and_then(|m| m.as_array())?;
+    let is_cc_switch_export = catalog.get("format").and_then(|v| v.as_str())
+        == Some("cc-switch-model-mapping");
 
     let default_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
@@ -2201,7 +2218,8 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
     let mut entries = Vec::with_capacity(models.len());
     for entry in models {
         let Some(model) = entry
-            .get("slug")
+            .get("model")
+            .or_else(|| entry.get("slug"))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -2213,31 +2231,39 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
         obj.insert("model".to_string(), json!(model));
 
         if let Some(display_name) = entry
-            .get("display_name")
+            .get("displayName")
+            .or_else(|| entry.get("display_name"))
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|s| !s.is_empty() && *s != model)
+            .filter(|s| !s.is_empty() && (is_cc_switch_export || *s != model))
         {
             obj.insert("displayName".to_string(), json!(display_name));
         }
 
-        if let Some(context_window) = entry
-            .get("context_window")
-            .and_then(|v| v.as_u64())
-            .filter(|v| *v > 0 && *v != default_context_window)
-        {
-            obj.insert("contextWindow".to_string(), json!(context_window));
+        if let Some(context_window) = parse_codex_positive_u64(
+            entry
+                .get("contextWindow")
+                .or_else(|| entry.get("context_window")),
+        ) {
+            if is_cc_switch_export || context_window != default_context_window {
+                obj.insert("contextWindow".to_string(), json!(context_window));
+            }
         }
 
         // Preserve native-profile per-row overrides so a DB-SSOT-missing
         // fallback round-trip doesn't silently drop them.
         if let Some(parallel) = entry
-            .get("supports_parallel_tool_calls")
+            .get("supportsParallelToolCalls")
+            .or_else(|| entry.get("supports_parallel_tool_calls"))
             .and_then(|v| v.as_bool())
         {
             obj.insert("supportsParallelToolCalls".to_string(), json!(parallel));
         }
-        if let Some(modalities) = entry.get("input_modalities").and_then(|v| v.as_array()) {
+        if let Some(modalities) = entry
+            .get("inputModalities")
+            .or_else(|| entry.get("input_modalities"))
+            .and_then(|v| v.as_array())
+        {
             let mods: Vec<String> = modalities
                 .iter()
                 .filter_map(|m| m.as_str())
@@ -2247,6 +2273,26 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             if !mods.is_empty() && mods != inferred {
                 obj.insert("inputModalities".to_string(), json!(mods));
             }
+        }
+        if let Some(base_instructions) = entry
+            .get("baseInstructions")
+            .or_else(|| entry.get("base_instructions"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            obj.insert(
+                "baseInstructions".to_string(),
+                json!(base_instructions),
+            );
+        }
+        if let Some(route_mode) = entry
+            .get("route_mode")
+            .or_else(|| entry.get("routeMode"))
+            .and_then(|v| v.as_str())
+            .filter(|mode| matches!(*mode, "chat" | "responses" | "anthropic"))
+        {
+            obj.insert("routeMode".to_string(), json!(route_mode));
         }
 
         entries.push(Value::Object(obj));
@@ -5072,6 +5118,70 @@ web_search = "disabled"
             models[3].get("inputModalities"),
             Some(&json!(["text", "image"])),
             "an explicit image override for a registered text-only model must round-trip"
+        );
+    }
+
+    #[test]
+    fn build_simplified_catalog_preserves_hidden_import_fields() {
+        let catalog = r#"{
+            "models": [{
+                "slug": "gpt-native",
+                "base_instructions": "vendor model identity",
+                "supports_parallel_tool_calls": false,
+                "route_mode": "responses"
+            }]
+        }"#;
+
+        let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
+        let entry = &result.get("models").unwrap().as_array().unwrap()[0];
+        assert_eq!(
+            entry.get("baseInstructions").and_then(|v| v.as_str()),
+            Some("vendor model identity")
+        );
+        assert_eq!(
+            entry
+                .get("supportsParallelToolCalls")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            entry.get("routeMode").and_then(|v| v.as_str()),
+            Some("responses")
+        );
+    }
+
+    #[test]
+    fn build_simplified_catalog_reads_portable_cc_switch_export() {
+        let catalog = r#"{
+            "format": "cc-switch-model-mapping",
+            "version": 1,
+            "models": [{
+                "model": "deepseek-v4-pro",
+                "displayName": "DeepSeek V4 Pro",
+                "contextWindow": "128000",
+                "routeMode": "chat",
+                "inputModalities": ["text"]
+            }]
+        }"#;
+
+        let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
+        let entry = &result.get("models").unwrap().as_array().unwrap()[0];
+        assert_eq!(
+            entry.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(
+            entry.get("displayName").and_then(|v| v.as_str()),
+            Some("DeepSeek V4 Pro")
+        );
+        assert_eq!(
+            entry.get("contextWindow").and_then(|v| v.as_u64()),
+            Some(128_000),
+            "portable exports must preserve explicit values even when they match live defaults"
+        );
+        assert_eq!(
+            entry.get("routeMode").and_then(|v| v.as_str()),
+            Some("chat")
         );
     }
 

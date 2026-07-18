@@ -48,12 +48,15 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { toast } from "sonner";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   Check,
   ChevronDown,
   ChevronRight,
   ChevronsUpDown,
   Download,
+  FileInput,
+  FileOutput,
   GripVertical,
   Loader2,
   Plus,
@@ -72,6 +75,7 @@ import {
 import { CustomUserAgentField } from "./CustomUserAgentField";
 import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
 import { cn } from "@/lib/utils";
+import { providersApi } from "@/lib/api/providers";
 import type {
   ClaudeApiKeyField,
   CodexApiFormat,
@@ -653,6 +657,8 @@ export function CodexFormFields({
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [isImportingCatalog, setIsImportingCatalog] = useState(false);
+  const [isExportingCatalog, setIsExportingCatalog] = useState(false);
   // 拉取请求序号：请求身份（Base URL / 完整地址开关 / API Key / 自定义 UA）
   // 一变即自增，清空旧列表并作废在途响应——/models 结果可能按 Key 的模型
   // 授权返回，换号后残留旧列表会误导选择
@@ -880,6 +886,133 @@ export function CodexFormFields({
     ]);
   }, [fallbackRouteMode, onCatalogModelsChange]);
 
+  const handleImportCatalog = useCallback(async () => {
+    if (!onCatalogModelsChange) return;
+
+    setIsImportingCatalog(true);
+    try {
+      const filePath = await open({
+        title: t("codexConfig.importCatalog", {
+          defaultValue: "从本地导入",
+        }),
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!filePath) return;
+
+      const catalog = await providersApi.readCodexModelCatalogFile(filePath);
+      const importedModels = Array.isArray(catalog?.models)
+        ? catalog.models.filter(
+            (model): model is CodexCatalogModel =>
+              typeof model === "object" &&
+              model !== null &&
+              typeof model.model === "string" &&
+              model.model.trim().length > 0,
+          )
+        : [];
+
+      if (importedModels.length === 0) {
+        toast.info(
+          t("codexConfig.importCatalogEmpty", {
+            defaultValue: "本地模型目录中没有可导入的模型",
+          }),
+        );
+        return;
+      }
+
+      setCatalogRows((current) => {
+        const existingRouteModes = new Map(
+          current.map((row) => [
+            row.model.trim(),
+            normalizeRouteMode(row.routeMode, fallbackRouteMode),
+          ]),
+        );
+        return importedModels.map((model) =>
+          createCatalogRow(
+            {
+              ...model,
+              routeMode:
+                model.routeMode ?? existingRouteModes.get(model.model.trim()),
+            },
+            fallbackRouteMode,
+          ),
+        );
+      });
+      toast.success(
+        t("codexConfig.importCatalogSuccess", {
+          count: importedModels.length,
+          defaultValue: "已导入 {{count}} 个模型；保存供应商后才会写入配置",
+        }),
+      );
+    } catch (error) {
+      console.warn("[CodexCatalogImport] Failed:", error);
+      toast.error(
+        t("codexConfig.importCatalogFailed", {
+          defaultValue: "读取本地模型目录失败",
+        }),
+        { description: String(error) },
+      );
+    } finally {
+      setIsImportingCatalog(false);
+    }
+  }, [fallbackRouteMode, onCatalogModelsChange, t]);
+
+  const handleExportCatalog = useCallback(async () => {
+    const exportModels = catalogRows
+      .filter((row) => row.model.trim().length > 0)
+      .map(({ rowId: _rowId, ...model }) => {
+        const displayName = model.displayName?.trim();
+        const contextWindow = String(model.contextWindow ?? "").trim();
+        return {
+          ...model,
+          model: model.model.trim(),
+          ...(displayName ? { displayName } : { displayName: undefined }),
+          ...(contextWindow ? { contextWindow } : { contextWindow: undefined }),
+          routeMode: normalizeRouteMode(model.routeMode, fallbackRouteMode),
+        };
+      });
+
+    if (exportModels.length === 0) {
+      toast.info(
+        t("codexConfig.exportCatalogEmpty", {
+          defaultValue: "没有可导出的模型映射",
+        }),
+      );
+      return;
+    }
+
+    setIsExportingCatalog(true);
+    try {
+      const filePath = await save({
+        title: t("codexConfig.exportCatalog", {
+          defaultValue: "导出映射",
+        }),
+        defaultPath: "cc-switch-model-mapping.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!filePath) return;
+
+      await providersApi.exportCodexModelMappingFile(filePath, exportModels);
+      toast.success(
+        t("codexConfig.exportCatalogSuccess", {
+          count: exportModels.length,
+          defaultValue: "已导出 {{count}} 个模型映射",
+        }),
+      );
+    } catch (error) {
+      console.warn("[CodexCatalogExport] Failed:", error);
+      toast.error(
+        t("codexConfig.exportCatalogFailed", {
+          defaultValue: "导出模型映射失败",
+        }),
+        { description: String(error) },
+      );
+    } finally {
+      setIsExportingCatalog(false);
+    }
+  }, [catalogRows, fallbackRouteMode, t]);
+
   const handleUpdateCatalogRow = useCallback(
     (index: number, patch: Partial<CodexCatalogModel>) => {
       setCatalogRows((current) =>
@@ -950,7 +1083,41 @@ export function CodexFormFields({
   }, [fallbackRouteMode, onCatalogModelsChange, trimmedDefaultModel]);
 
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
-    <div className="flex gap-1">
+    <div className="flex flex-wrap justify-end gap-1">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={handleImportCatalog}
+        disabled={isImportingCatalog}
+        className="h-7 gap-1"
+      >
+        {isImportingCatalog ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <FileInput className="h-3.5 w-3.5" />
+        )}
+        {t("codexConfig.importCatalog", {
+          defaultValue: "从本地导入",
+        })}
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={handleExportCatalog}
+        disabled={isExportingCatalog}
+        className="h-7 gap-1"
+      >
+        {isExportingCatalog ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <FileOutput className="h-3.5 w-3.5" />
+        )}
+        {t("codexConfig.exportCatalog", {
+          defaultValue: "导出映射",
+        })}
+      </Button>
       <Button
         type="button"
         variant="outline"

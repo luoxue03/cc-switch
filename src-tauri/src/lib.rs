@@ -1393,6 +1393,8 @@ pub fn run() {
             commands::update_toml_common_config_snippet,
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
+            commands::read_codex_model_catalog_file,
+            commands::export_codex_model_mapping_file,
             commands::get_settings,
             commands::save_settings,
             commands::has_codex_unify_history_backup,
