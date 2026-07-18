@@ -152,6 +152,19 @@ export function providerNeedsRouting(
       fmt === "anthropic"
     )
       return true;
+    const modelCatalog = (provider.settingsConfig as Record<string, unknown>)
+      ?.modelCatalog as
+      | { models?: Array<Record<string, unknown>> }
+      | undefined;
+    if (
+      Array.isArray(modelCatalog?.models) &&
+      modelCatalog.models.some((model) => {
+        const routeMode = model.routeMode ?? model.route_mode;
+        return routeMode === "chat" || routeMode === "anthropic";
+      })
+    ) {
+      return true;
+    }
     const config = (provider.settingsConfig as Record<string, unknown>)?.config;
     return (
       typeof config === "string" &&

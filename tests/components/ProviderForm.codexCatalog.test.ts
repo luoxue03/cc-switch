@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeCodexCatalogModelsForSave } from "@/components/providers/forms/ProviderForm";
+import {
+  buildCodexRouteSettingsMeta,
+  normalizeCodexCatalogModelsForSave,
+} from "@/components/providers/forms/ProviderForm";
 import { mapCodexCatalogModelForForm } from "@/components/providers/forms/hooks/useCodexConfigState";
 
 describe("ProviderForm Codex catalog helpers", () => {
@@ -97,8 +100,9 @@ describe("ProviderForm Codex catalog helpers", () => {
         displayName: "DeepSeek V4 Flash",
         reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"],
         defaultReasoningLevel: "xhigh",
+        routeMode: "responses",
       },
-      { model: "plain-model" },
+      { model: "plain-model", routeMode: "responses" },
     ]);
   });
 
@@ -126,9 +130,14 @@ describe("ProviderForm Codex catalog helpers", () => {
         model: "glm-5.2",
         displayName: "GLM 5.2",
         reasoningLevels: ["high", "max"],
+        routeMode: "responses",
       },
-      { model: "deepseek-v4-flash", reasoningLevels: ["low", "high", "max"] },
-      { model: "glm-5.1" },
+      {
+        model: "deepseek-v4-flash",
+        reasoningLevels: ["low", "high", "max"],
+        routeMode: "responses",
+      },
+      { model: "glm-5.1", routeMode: "responses" },
     ]);
   });
 
@@ -138,6 +147,58 @@ describe("ProviderForm Codex catalog helpers", () => {
       normalizeCodexCatalogModelsForSave([
         { model: "glm-5.2", reasoningLevels: [" high ", "max"] },
       ]),
-    ).toEqual([{ model: "glm-5.2", reasoningLevels: ["high", "max"] }]);
+    ).toEqual([
+      {
+        model: "glm-5.2",
+        reasoningLevels: ["high", "max"],
+        routeMode: "responses",
+      },
+    ]);
+  });
+
+  it("persists Chat and Anthropic settings together for the current Codex provider", () => {
+    expect(
+      buildCodexRouteSettingsMeta({
+        enabled: true,
+        chatReasoning: {
+          supportsThinking: true,
+          supportsEffort: true,
+          effortParam: "reasoning_effort",
+        },
+        promptCacheRouting: "enabled",
+        anthropicAuthField: "ANTHROPIC_API_KEY",
+        impersonateClaudeCode: true,
+        maxOutputTokens: "65536",
+      }),
+    ).toMatchObject({
+      codexChatReasoning: {
+        supportsThinking: true,
+        supportsEffort: true,
+        effortParam: "reasoning_effort",
+      },
+      promptCacheRouting: "enabled",
+      apiKeyField: "ANTHROPIC_API_KEY",
+      impersonateClaudeCode: true,
+      maxOutputTokens: 65536,
+    });
+  });
+
+  it("does not write Codex route settings for another app or an official provider", () => {
+    expect(
+      buildCodexRouteSettingsMeta({
+        enabled: false,
+        chatReasoning: { supportsThinking: true },
+        promptCacheRouting: "enabled",
+        anthropicAuthField: "ANTHROPIC_API_KEY",
+        impersonateClaudeCode: true,
+        maxOutputTokens: "65536",
+      }),
+    ).toEqual({
+      codexChatReasoning: undefined,
+      promptCacheRouting: undefined,
+      apiKeyField: undefined,
+      impersonateClaudeCode: undefined,
+      maxOutputTokens: undefined,
+    });
   });
 });
