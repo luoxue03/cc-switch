@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  CodexCatalogModel,
   Provider,
   UniversalProvider,
   UniversalProvidersMap,
@@ -44,6 +45,10 @@ export interface ClaudeDesktopDefaultRoute {
   routeId: string;
   envKey: string;
   supports1m: boolean;
+}
+
+export interface CodexModelCatalogImport {
+  models: CodexCatalogModel[];
 }
 
 export const providersApi = {
@@ -93,6 +98,19 @@ export const providersApi = {
 
   async importDefault(appId: AppId): Promise<boolean> {
     return await invoke("import_default_config", { app: appId });
+  },
+
+  async readCodexModelCatalogFile(
+    filePath: string,
+  ): Promise<CodexModelCatalogImport | null> {
+    return await invoke("read_codex_model_catalog_file", { filePath });
+  },
+
+  async exportCodexModelMappingFile(
+    filePath: string,
+    models: CodexCatalogModel[],
+  ): Promise<void> {
+    await invoke("export_codex_model_mapping_file", { filePath, models });
   },
 
   async importClaudeDesktopFromClaude(): Promise<number> {

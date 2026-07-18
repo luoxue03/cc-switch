@@ -710,6 +710,29 @@ pub fn read_live_provider_settings(app: String) -> Result<serde_json::Value, Str
 }
 
 #[tauri::command]
+pub fn read_codex_model_catalog_file(
+    #[allow(non_snake_case)] filePath: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let path = std::path::PathBuf::from(filePath);
+    crate::codex_config::read_codex_model_catalog_simplified_from_file(&path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn export_codex_model_mapping_file(
+    #[allow(non_snake_case)] filePath: String,
+    models: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let path = std::path::PathBuf::from(filePath);
+    let payload = serde_json::json!({
+        "format": "cc-switch-model-mapping",
+        "version": 1,
+        "models": models,
+    });
+    crate::config::write_json_file(&path, &payload).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn test_api_endpoints(
     urls: Vec<String>,
     #[allow(non_snake_case)] timeoutSecs: Option<u64>,
