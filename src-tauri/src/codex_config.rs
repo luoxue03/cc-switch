@@ -4943,6 +4943,36 @@ name = "any"
     }
 
     #[test]
+    fn model_catalog_json_generation_preserves_user_owned_absolute_path() {
+        let input = r#"model_provider = "custom"
+model_catalog_json = "/Users/me/.codex/my-custom-catalog.json"
+"#;
+        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+
+        let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed.get("model_catalog_json").and_then(|value| value.as_str()),
+            Some("/Users/me/.codex/my-custom-catalog.json")
+        );
+    }
+
+    #[test]
+    fn model_catalog_json_generation_preserves_user_owned_relative_filename() {
+        let input = r#"model_provider = "custom"
+model_catalog_json = "my-custom-catalog.json"
+"#;
+        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+
+        let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed.get("model_catalog_json").and_then(|value| value.as_str()),
+            Some("my-custom-catalog.json")
+        );
+    }
+
+    #[test]
     fn native_web_search_field_disables_at_top_level() {
         // Native `/responses` gateways reject the web_search tool, so the
         // NativeResponses profile must write the top-level disable line even
