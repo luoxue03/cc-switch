@@ -153,8 +153,23 @@ function getPresetProviderType(
     : undefined;
 }
 
+const routeModeFromCodexApiFormat = (
+  apiFormat: CodexApiFormat,
+): NonNullable<CodexCatalogModel["routeMode"]> => {
+  switch (apiFormat) {
+    case "openai_chat":
+      return "chat";
+    case "anthropic":
+      return "anthropic";
+    case "openai_responses":
+    default:
+      return "responses";
+  }
+};
+
 export const normalizeCodexCatalogModelsForSave = (
   models: CodexCatalogModel[],
+  fallbackRouteMode: CodexCatalogModel["routeMode"] = "responses",
 ): CodexCatalogModel[] => {
   const seen = new Set<string>();
   const normalized: CodexCatalogModel[] = [];
@@ -172,6 +187,12 @@ export const normalizeCodexCatalogModelsForSave = (
     const contextWindow = rawContextWindow
       ? Number.parseInt(rawContextWindow, 10)
       : undefined;
+    const routeMode =
+      item.routeMode === "chat" ||
+      item.routeMode === "responses" ||
+      item.routeMode === "anthropic"
+        ? item.routeMode
+        : fallbackRouteMode;
 
     const inputModalities = item.inputModalities?.filter(
       (m) => typeof m === "string" && m.trim(),
@@ -199,6 +220,7 @@ export const normalizeCodexCatalogModelsForSave = (
         ? { reasoningLevels }
         : {}),
       ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
+      ...(routeMode ? { routeMode } : {}),
     });
   }
 
@@ -242,6 +264,57 @@ const normalizeCodexChatReasoningForSave = (
 
 const normalizeProviderKey = (value: string) =>
   value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+
+type CodexRouteSettingsMeta = Pick<
+  ProviderMeta,
+  | "codexChatReasoning"
+  | "promptCacheRouting"
+  | "apiKeyField"
+  | "impersonateClaudeCode"
+  | "maxOutputTokens"
+>;
+
+export const buildCodexRouteSettingsMeta = ({
+  enabled,
+  chatReasoning,
+  promptCacheRouting,
+  anthropicAuthField,
+  impersonateClaudeCode,
+  maxOutputTokens,
+}: {
+  enabled: boolean;
+  chatReasoning?: CodexChatReasoning;
+  promptCacheRouting: PromptCacheRoutingMode;
+  anthropicAuthField: ClaudeApiKeyField;
+  impersonateClaudeCode: boolean;
+  maxOutputTokens: string;
+}): CodexRouteSettingsMeta => {
+  if (!enabled) {
+    return {
+      codexChatReasoning: undefined,
+      promptCacheRouting: undefined,
+      apiKeyField: undefined,
+      impersonateClaudeCode: undefined,
+      maxOutputTokens: undefined,
+    };
+  }
+
+  const parsedMaxOutputTokens = Number(maxOutputTokens);
+  return {
+    codexChatReasoning: normalizeCodexChatReasoningForSave(chatReasoning),
+    promptCacheRouting:
+      promptCacheRouting !== "auto" ? promptCacheRouting : undefined,
+    apiKeyField:
+      anthropicAuthField !== "ANTHROPIC_AUTH_TOKEN"
+        ? anthropicAuthField
+        : undefined,
+    impersonateClaudeCode: impersonateClaudeCode ? true : undefined,
+    maxOutputTokens:
+      maxOutputTokens.trim() !== "" && parsedMaxOutputTokens > 0
+        ? parsedMaxOutputTokens
+        : undefined,
+  };
+};
 
 type LocalProxyRequestOverridesBuildResult = ReturnType<
   typeof buildLocalProxyRequestOverrides
@@ -1516,7 +1589,10 @@ function ProviderFormFull({
         // 留空归一化为 [] 即不写。后端只看 modelCatalog.models 是否非空。
         const normalizedCatalogModels =
           category !== "official"
-            ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
+            ? normalizeCodexCatalogModelsForSave(
+                codexCatalogModels,
+                routeModeFromCodexApiFormat(localCodexApiFormat),
+              )
             : [];
         // The default-model field writes the top-level `model` into the TOML
         // as the user types; only when it was left empty fall back to the
@@ -1703,6 +1779,15 @@ function ProviderFormFull({
       delete baseMeta.custom_endpoints;
     }
 
+    const codexRouteSettingsMeta = buildCodexRouteSettingsMeta({
+      enabled: appId === "codex" && category !== "official",
+      chatReasoning: codexChatReasoning,
+      promptCacheRouting,
+      anthropicAuthField: localCodexAnthropicAuthField,
+      impersonateClaudeCode: localCodexImpersonateClaudeCode,
+      maxOutputTokens: localCodexMaxOutputTokens,
+    });
+
     const providerType = isCopilotProvider
       ? "github_copilot"
       : isClaudeCodexOauthProvider || isCodexOfficialManagedOauthBound
@@ -1756,19 +1841,8 @@ function ProviderFormFull({
           ? selectedGitHubAccountId
           : undefined,
       codexFastMode: isClaudeCodexOauthProvider ? codexFastMode : undefined,
-      codexChatReasoning:
-        appId === "codex" &&
-        category !== "official" &&
-        localCodexApiFormat === "openai_chat"
-          ? normalizeCodexChatReasoningForSave(codexChatReasoning)
-          : undefined,
-      promptCacheRouting:
-        appId === "codex" &&
-        category !== "official" &&
-        localCodexApiFormat === "openai_chat" &&
-        promptCacheRouting !== "auto"
-          ? promptCacheRouting
-          : undefined,
+      codexChatReasoning: codexRouteSettingsMeta.codexChatReasoning,
+      promptCacheRouting: codexRouteSettingsMeta.promptCacheRouting,
       customUserAgent:
         (appId === "claude" || appId === "codex") && category !== "official"
           ? customUserAgent.trim() || undefined
@@ -1798,29 +1872,11 @@ function ProviderFormFull({
         category !== "official" &&
         localApiKeyField !== "ANTHROPIC_AUTH_TOKEN"
           ? localApiKeyField
-          : appId === "codex" &&
-              category !== "official" &&
-              localCodexApiFormat === "anthropic" &&
-              localCodexAnthropicAuthField !== "ANTHROPIC_AUTH_TOKEN"
-            ? localCodexAnthropicAuthField
-            : undefined,
-      // Off by default; persist true only for codex+anthropic when the user explicitly enables it
-      impersonateClaudeCode:
-        appId === "codex" &&
-        category !== "official" &&
-        localCodexApiFormat === "anthropic" &&
-        localCodexImpersonateClaudeCode
-          ? true
-          : undefined,
-      // Persist only for codex+anthropic when a positive value was entered
-      maxOutputTokens:
-        appId === "codex" &&
-        category !== "official" &&
-        localCodexApiFormat === "anthropic" &&
-        localCodexMaxOutputTokens.trim() !== "" &&
-        Number(localCodexMaxOutputTokens) > 0
-          ? Number(localCodexMaxOutputTokens)
-          : undefined,
+          : codexRouteSettingsMeta.apiKeyField,
+      // Route-specific settings survive switching the provider's fallback format.
+      // The proxy only consumes them when the matched model route uses that format.
+      impersonateClaudeCode: codexRouteSettingsMeta.impersonateClaudeCode,
+      maxOutputTokens: codexRouteSettingsMeta.maxOutputTokens,
       isFullUrl:
         supportsFullUrl &&
         category !== "official" &&

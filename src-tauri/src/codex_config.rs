@@ -428,6 +428,23 @@ impl CodexCatalogToolProfile {
             _ => CodexCatalogToolProfile::ProxyChat,
         }
     }
+
+    fn from_route_mode(route_mode: Option<&str>) -> Option<Self> {
+        match route_mode?.trim().to_ascii_lowercase().as_str() {
+            "chat" | "openai_chat" | "openai-chat" => Some(Self::ProxyChat),
+            "responses" | "openai_responses" | "openai-responses" => {
+                Some(Self::NativeResponses)
+            }
+            "anthropic"
+            | "anthropic_messages"
+            | "anthropic-messages"
+            | "claude"
+            | "messages" => {
+                Some(Self::Anthropic)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Reserved built-in provider IDs from OpenAI Codex's config/model-provider
@@ -1490,6 +1507,13 @@ const CODEX_REASONING_LEVEL_DESCRIPTIONS: &[(&str, &str)] = &[
     ("ultra", "Ultra reasoning depth"),
 ];
 
+/// Generic Responses and Anthropic routes can carry a real reasoning effort,
+/// so their neutral catalog fallback must expose more than the old binary
+/// none/high toggle. Explicit per-model declarations and official vendor
+/// catalogs remain authoritative.
+const CODEX_ROUTED_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
+const CODEX_ROUTED_DEFAULT_REASONING_LEVEL: &str = "medium";
+
 fn codex_reasoning_level_description(effort: &str) -> Option<&'static str> {
     CODEX_REASONING_LEVEL_DESCRIPTIONS
         .iter()
@@ -1556,6 +1580,34 @@ fn apply_codex_reasoning_level_override(
         entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
     }
     true
+}
+
+fn apply_codex_routed_reasoning_default(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    profile: CodexCatalogToolProfile,
+    spec: &CodexCatalogModelSpec,
+) {
+    if profile == CodexCatalogToolProfile::ProxyChat || spec.reasoning_levels.is_some() {
+        return;
+    }
+
+    let levels: Vec<String> = CODEX_ROUTED_REASONING_LEVELS
+        .iter()
+        .map(|level| (*level).to_string())
+        .collect();
+    entry_obj.insert(
+        "supported_reasoning_levels".to_string(),
+        codex_supported_reasoning_levels(&levels),
+    );
+    let default_level = spec
+        .default_reasoning_level
+        .as_deref()
+        .filter(|level| CODEX_ROUTED_REASONING_LEVELS.contains(level))
+        .unwrap_or(CODEX_ROUTED_DEFAULT_REASONING_LEVEL);
+    entry_obj.insert(
+        "default_reasoning_level".to_string(),
+        json!(default_level),
+    );
 }
 
 fn codex_catalog_model_entry(
@@ -1635,7 +1687,9 @@ fn codex_catalog_model_entry(
     let template_default = template
         .get("default_reasoning_level")
         .and_then(|value| value.as_str());
-    apply_codex_reasoning_level_override(entry_obj, template_default, spec);
+    if !apply_codex_reasoning_level_override(entry_obj, template_default, spec) {
+        apply_codex_routed_reasoning_default(entry_obj, profile, spec);
+    }
 
     entry
 }
@@ -1650,6 +1704,8 @@ struct CodexCatalogModelSpec {
     /// `model_context_window` (or 128k) — except official vendor catalog
     /// entries, which keep the vendor's declared window.
     context_window: Option<u64>,
+    /// Per-model wire route. When omitted, inherit the provider-level profile.
+    tool_profile: Option<CodexCatalogToolProfile>,
     /// Per-row override for the native template's `supports_parallel_tool_calls`
     /// (e.g. MiniMax=true, MiMo=false). Only consulted for `NativeResponses`.
     supports_parallel_tool_calls: Option<bool>,
@@ -1739,6 +1795,12 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string);
+        let tool_profile = CodexCatalogToolProfile::from_route_mode(
+            model_config
+                .get("routeMode")
+                .or_else(|| model_config.get("route_mode"))
+                .and_then(|value| value.as_str()),
+        );
 
         let reasoning_levels = model_config
             .get("reasoningLevels")
@@ -1766,6 +1828,7 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
             model: model.to_string(),
             display_name,
             context_window,
+            tool_profile,
             supports_parallel_tool_calls,
             input_modalities,
             base_instructions,
@@ -2259,14 +2322,27 @@ fn load_codex_model_catalog_template() -> Result<Value, AppError> {
 
 fn codex_model_catalog_from_specs(
     specs: &[CodexCatalogModelSpec],
-    template: &Value,
-    profile: CodexCatalogToolProfile,
+    proxy_chat_template: &Value,
+    native_template: &Value,
+    default_profile: CodexCatalogToolProfile,
     default_context_window: u64,
+    vendor_models: Option<&[Value]>,
 ) -> Value {
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
         .map(|(index, spec)| {
+            let profile = spec.tool_profile.unwrap_or(default_profile);
+            if profile == CodexCatalogToolProfile::NativeResponses {
+                if let Some(vendor_models) = vendor_models {
+                    return codex_vendor_catalog_model_entry(vendor_models, spec, index);
+                }
+            }
+            let template = match profile {
+                CodexCatalogToolProfile::ProxyChat => proxy_chat_template,
+                CodexCatalogToolProfile::NativeResponses
+                | CodexCatalogToolProfile::Anthropic => native_template,
+            };
             codex_catalog_model_entry(template, spec, index, profile, default_context_window)
         })
         .collect();
@@ -2284,37 +2360,38 @@ fn codex_model_catalog_from_settings(
         return Ok(None);
     }
 
-    // Vendors that publish an OFFICIAL Codex models.json for their native
-    // `/responses` gateway get it mirrored verbatim instead of the neutral
-    // template: its freeform apply_patch, vendor harness base_instructions and
-    // reasoning levels are load-bearing (the harness tells the model to use
-    // apply_patch, so catalog and harness must stay consistent).
-    if let Some(vendor_models) = codex_official_vendor_catalog_models(config_text, profile) {
-        let entries: Vec<Value> = specs
-            .iter()
-            .enumerate()
-            .map(|(index, spec)| codex_vendor_catalog_model_entry(&vendor_models, spec, index))
-            .collect();
-        return Ok(Some(json!({ "models": entries })));
-    }
-
     let default_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
-
-    // Native providers use the bundled clean template (no freeform apply_patch,
-    // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
-    // entry so the proxy can rewrite custom<->function tools as before.
-    let template = match profile {
-        CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::Anthropic => {
-            load_codex_native_responses_template()
-        }
-        CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
+    // A mixed provider may expose Chat, Responses, and Anthropic models under
+    // the same key/base URL. Load each required template once, then choose per
+    // row from routeMode; the provider profile remains the legacy fallback.
+    let native_template = load_codex_native_responses_template();
+    let needs_proxy_chat_template = specs
+        .iter()
+        .any(|spec| spec.tool_profile.unwrap_or(profile) == CodexCatalogToolProfile::ProxyChat);
+    let proxy_chat_template = if needs_proxy_chat_template {
+        load_codex_model_catalog_template()?
+    } else {
+        native_template.clone()
     };
+    let has_native_responses = specs.iter().any(|spec| {
+        spec.tool_profile.unwrap_or(profile) == CodexCatalogToolProfile::NativeResponses
+    });
+    let vendor_models = has_native_responses
+        .then(|| {
+            codex_official_vendor_catalog_models(
+                config_text,
+                CodexCatalogToolProfile::NativeResponses,
+            )
+        })
+        .flatten();
     Ok(Some(codex_model_catalog_from_specs(
         &specs,
-        &template,
+        &proxy_chat_template,
+        &native_template,
         profile,
         default_context_window,
+        vendor_models.as_deref(),
     )))
 }
 
@@ -2402,6 +2479,13 @@ pub fn prepare_codex_config_text_with_model_catalog(
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
     let catalog_path = get_codex_model_catalog_path();
+    let catalog_specs = codex_catalog_model_specs(settings);
+    let all_catalog_models_anthropic = !catalog_specs.is_empty()
+        && catalog_specs
+            .iter()
+            .all(|spec| {
+                spec.tool_profile.unwrap_or(profile) == CodexCatalogToolProfile::Anthropic
+            });
 
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
@@ -2409,15 +2493,14 @@ pub fn prepare_codex_config_text_with_model_catalog(
         // (MiMo/LongCat/MiniMax by host or model brand; Qwen3-Coder by model).
         // Everything else — relays, DouBao, web-search-capable Qwen models,
         // unknown providers — keeps Codex's default.
-        let disable_web_search = match profile {
-            // The Responses→Anthropic transform silently drops the Codex web_search
-            // hosted tool, so always disable it here rather than present a dead tool.
-            CodexCatalogToolProfile::Anthropic => true,
-            CodexCatalogToolProfile::NativeResponses => {
-                codex_native_gateway_rejects_web_search(&config_text)
-            }
-            CodexCatalogToolProfile::ProxyChat => false,
-        };
+        // `web_search` is a top-level Codex setting and cannot vary by model.
+        // Disable it for an all-Anthropic catalog, but keep it available for a
+        // mixed hub; the Anthropic request transform already drops the hosted
+        // tool on only those requests. Preserve the native-gateway blacklist
+        // for the provider-level Responses fallback.
+        let disable_web_search = all_catalog_models_anthropic
+            || (profile == CodexCatalogToolProfile::NativeResponses
+                && codex_native_gateway_rejects_web_search(&config_text));
         let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
         write_json_file(&catalog_path, &catalog)?;
         Ok(config_text)
@@ -2499,6 +2582,21 @@ pub(crate) fn read_limited_string(path: &Path, max_bytes: u64) -> Result<String,
 /// Read the cc-switch Codex model catalog file with a size cap.
 pub(crate) fn read_codex_model_catalog_text(path: &Path) -> Result<String, AppError> {
     read_limited_string(path, MAX_CODEX_CATALOG_BYTES)
+}
+
+/// Read a user-selected Codex model catalog for an explicit UI import.
+pub fn read_codex_model_catalog_simplified_from_file(
+    catalog_path: &Path,
+) -> Result<Option<Value>, AppError> {
+    let config_text = read_codex_config_text()?;
+    if !catalog_path.exists() {
+        return Ok(None);
+    }
+    let catalog_text = read_limited_string(catalog_path, MAX_CODEX_CATALOG_BYTES)?;
+    Ok(build_simplified_catalog_from_texts(
+        &config_text,
+        &catalog_text,
+    ))
 }
 
 /// Given `config.toml` text, resolve the on-disk path of the cc-switch–owned
@@ -2587,6 +2685,8 @@ pub(crate) fn resolve_cc_switch_catalog_path(
 fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) -> Option<Value> {
     let catalog: Value = serde_json::from_str(catalog_text).ok()?;
     let models = catalog.get("models").and_then(|m| m.as_array())?;
+    let is_cc_switch_export = catalog.get("format").and_then(|v| v.as_str())
+        == Some("cc-switch-model-mapping");
 
     let default_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
@@ -2594,7 +2694,8 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
     let mut entries = Vec::with_capacity(models.len());
     for entry in models {
         let Some(model) = entry
-            .get("slug")
+            .get("model")
+            .or_else(|| entry.get("slug"))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -2606,31 +2707,39 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
         obj.insert("model".to_string(), json!(model));
 
         if let Some(display_name) = entry
-            .get("display_name")
+            .get("displayName")
+            .or_else(|| entry.get("display_name"))
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|s| !s.is_empty() && *s != model)
+            .filter(|s| !s.is_empty() && (is_cc_switch_export || *s != model))
         {
             obj.insert("displayName".to_string(), json!(display_name));
         }
 
-        if let Some(context_window) = entry
-            .get("context_window")
-            .and_then(|v| v.as_u64())
-            .filter(|v| *v > 0 && *v != default_context_window)
-        {
-            obj.insert("contextWindow".to_string(), json!(context_window));
+        if let Some(context_window) = parse_codex_positive_u64(
+            entry
+                .get("contextWindow")
+                .or_else(|| entry.get("context_window")),
+        ) {
+            if is_cc_switch_export || context_window != default_context_window {
+                obj.insert("contextWindow".to_string(), json!(context_window));
+            }
         }
 
         // Preserve native-profile per-row overrides so a DB-SSOT-missing
         // fallback round-trip doesn't silently drop them.
         if let Some(parallel) = entry
-            .get("supports_parallel_tool_calls")
+            .get("supportsParallelToolCalls")
+            .or_else(|| entry.get("supports_parallel_tool_calls"))
             .and_then(|v| v.as_bool())
         {
             obj.insert("supportsParallelToolCalls".to_string(), json!(parallel));
         }
-        if let Some(modalities) = entry.get("input_modalities").and_then(|v| v.as_array()) {
+        if let Some(modalities) = entry
+            .get("inputModalities")
+            .or_else(|| entry.get("input_modalities"))
+            .and_then(|v| v.as_array())
+        {
             let mods: Vec<String> = modalities
                 .iter()
                 .filter_map(|m| m.as_str())
@@ -2640,6 +2749,26 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             if !mods.is_empty() && mods != inferred {
                 obj.insert("inputModalities".to_string(), json!(mods));
             }
+        }
+        if let Some(base_instructions) = entry
+            .get("baseInstructions")
+            .or_else(|| entry.get("base_instructions"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            obj.insert(
+                "baseInstructions".to_string(),
+                json!(base_instructions),
+            );
+        }
+        if let Some(route_mode) = entry
+            .get("route_mode")
+            .or_else(|| entry.get("routeMode"))
+            .and_then(|v| v.as_str())
+            .filter(|mode| matches!(*mode, "chat" | "responses" | "anthropic"))
+        {
+            obj.insert("routeMode".to_string(), json!(route_mode));
         }
 
         entries.push(Value::Object(obj));
@@ -6731,6 +6860,7 @@ base_url = "https://production.api/v1"
             model: "k3".to_string(),
             display_name: Some("Kimi K3".to_string()),
             context_window: Some(262_144),
+            tool_profile: None,
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
@@ -6740,8 +6870,10 @@ base_url = "https://production.api/v1"
         let catalog = codex_model_catalog_from_specs(
             &specs,
             &template,
+            &template,
             CodexCatalogToolProfile::ProxyChat,
             128_000,
+            None,
         );
         assert_eq!(
             catalog["models"][0]
@@ -6808,8 +6940,10 @@ base_url = "https://production.api/v1"
         let catalog = codex_model_catalog_from_specs(
             &specs,
             &template,
+            &template,
             CodexCatalogToolProfile::ProxyChat,
             128_000,
+            None,
         );
         let models = catalog
             .get("models")
@@ -7183,6 +7317,79 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    fn mixed_catalog_uses_each_models_route_tool_profile() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "chat-model", "routeMode": "chat" },
+                    { "model": "responses-model", "routeMode": "responses" },
+                    { "model": "anthropic-model", "routeMode": "anthropic" },
+                    { "model": "fallback-model" },
+                    {
+                        "model": "responses-default-model",
+                        "routeMode": "responses",
+                        "defaultReasoningLevel": "xhigh"
+                    }
+                ]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings);
+        let proxy_template = json!({
+            "base_instructions": "proxy template",
+            "apply_patch_tool_type": "freeform",
+            "model_messages": { "instructions_template": "proxy" },
+            "input_modalities": ["text"]
+        });
+        let native_template = load_codex_native_responses_template();
+
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &proxy_template,
+            &native_template,
+            CodexCatalogToolProfile::NativeResponses,
+            128_000,
+            None,
+        );
+        let entries = catalog["models"].as_array().expect("models array");
+        let entry = |slug: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["slug"] == slug)
+                .expect("catalog entry")
+        };
+
+        assert_eq!(
+            entry("chat-model")["apply_patch_tool_type"],
+            json!("freeform"),
+            "Chat rows must keep the proxy tool surface"
+        );
+        for slug in ["responses-model", "anthropic-model", "fallback-model"] {
+            assert!(
+                entry(slug).get("apply_patch_tool_type").is_none(),
+                "{slug} must use the native-safe tool surface"
+            );
+            assert_eq!(entry(slug)["shell_type"], json!("shell_command"));
+            let efforts: Vec<&str> = entry(slug)["supported_reasoning_levels"]
+                .as_array()
+                .expect("routed entries must expose reasoning levels")
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(Value::as_str))
+                .collect();
+            assert_eq!(efforts, vec!["low", "medium", "high", "xhigh"]);
+            assert_eq!(
+                entry(slug)["default_reasoning_level"],
+                json!("medium"),
+                "{slug} must not be locked to high"
+            );
+        }
+        assert_eq!(
+            entry("responses-default-model")["default_reasoning_level"],
+            json!("xhigh"),
+            "an explicit supported default must win over the routed fallback"
+        );
+    }
+
+    #[test]
     fn catalog_infers_image_input_independently_of_tool_profile() {
         // Start from a deliberately text-only template to prove that every
         // profile overwrites template defaults with shared capability logic.
@@ -7195,6 +7402,7 @@ base_url = "https://production.api/v1"
                 model: "gpt-5.4".to_string(),
                 display_name: Some("GPT 5.4".to_string()),
                 context_window: Some(128_000),
+                tool_profile: None,
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
@@ -7205,6 +7413,7 @@ base_url = "https://production.api/v1"
                 model: "qwen/qwen3-coder-plus".to_string(),
                 display_name: Some("Qwen3 Coder Plus".to_string()),
                 context_window: Some(128_000),
+                tool_profile: None,
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
@@ -7215,6 +7424,7 @@ base_url = "https://production.api/v1"
                 model: "glm-5.2v".to_string(),
                 display_name: Some("GLM 5.2V".to_string()),
                 context_window: Some(128_000),
+                tool_profile: None,
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
@@ -7225,6 +7435,7 @@ base_url = "https://production.api/v1"
                 model: "deepseek-v4-flash".to_string(),
                 display_name: Some("Explicit Visual Override".to_string()),
                 context_window: Some(128_000),
+                tool_profile: None,
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
                 base_instructions: None,
@@ -7235,6 +7446,7 @@ base_url = "https://production.api/v1"
                 model: "custom-text-alias".to_string(),
                 display_name: Some("Explicit Text Override".to_string()),
                 context_window: Some(128_000),
+                tool_profile: None,
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string()]),
                 base_instructions: None,
@@ -7248,7 +7460,14 @@ base_url = "https://production.api/v1"
             CodexCatalogToolProfile::NativeResponses,
             CodexCatalogToolProfile::Anthropic,
         ] {
-            let catalog = codex_model_catalog_from_specs(&specs, &template, profile, 128_000);
+            let catalog = codex_model_catalog_from_specs(
+                &specs,
+                &template,
+                &template,
+                profile,
+                128_000,
+                None,
+            );
             let models = catalog["models"].as_array().expect("models array");
             let modalities = |slug: &str| {
                 models
@@ -7546,6 +7765,7 @@ wire_api = "responses"
             model: "x".to_string(),
             display_name: Some("x".to_string()),
             context_window: Some(128_000),
+            tool_profile: None,
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
@@ -7560,8 +7780,10 @@ wire_api = "responses"
         let catalog = codex_model_catalog_from_specs(
             &specs,
             &proxy_template,
+            &template,
             CodexCatalogToolProfile::ProxyChat,
             128_000,
+            None,
         );
         assert_eq!(
             catalog["models"][0]
@@ -7596,6 +7818,36 @@ name = "any"
                 .and_then(|value| value.get("model_catalog_json"))
                 .is_none(),
             "model_catalog_json should stay top-level"
+        );
+    }
+
+    #[test]
+    fn model_catalog_json_generation_preserves_user_owned_absolute_path() {
+        let input = r#"model_provider = "custom"
+model_catalog_json = "/Users/me/.codex/my-custom-catalog.json"
+"#;
+        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+
+        let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed.get("model_catalog_json").and_then(|value| value.as_str()),
+            Some("/Users/me/.codex/my-custom-catalog.json")
+        );
+    }
+
+    #[test]
+    fn model_catalog_json_generation_preserves_user_owned_relative_filename() {
+        let input = r#"model_provider = "custom"
+model_catalog_json = "my-custom-catalog.json"
+"#;
+        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+
+        let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed.get("model_catalog_json").and_then(|value| value.as_str()),
+            Some("my-custom-catalog.json")
         );
     }
 
@@ -7929,6 +8181,70 @@ web_search = "disabled"
             models[3].get("inputModalities"),
             Some(&json!(["text", "image"])),
             "an explicit image override for a registered text-only model must round-trip"
+        );
+    }
+
+    #[test]
+    fn build_simplified_catalog_preserves_hidden_import_fields() {
+        let catalog = r#"{
+            "models": [{
+                "slug": "gpt-native",
+                "base_instructions": "vendor model identity",
+                "supports_parallel_tool_calls": false,
+                "route_mode": "responses"
+            }]
+        }"#;
+
+        let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
+        let entry = &result.get("models").unwrap().as_array().unwrap()[0];
+        assert_eq!(
+            entry.get("baseInstructions").and_then(|v| v.as_str()),
+            Some("vendor model identity")
+        );
+        assert_eq!(
+            entry
+                .get("supportsParallelToolCalls")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            entry.get("routeMode").and_then(|v| v.as_str()),
+            Some("responses")
+        );
+    }
+
+    #[test]
+    fn build_simplified_catalog_reads_portable_cc_switch_export() {
+        let catalog = r#"{
+            "format": "cc-switch-model-mapping",
+            "version": 1,
+            "models": [{
+                "model": "deepseek-v4-pro",
+                "displayName": "DeepSeek V4 Pro",
+                "contextWindow": "128000",
+                "routeMode": "chat",
+                "inputModalities": ["text"]
+            }]
+        }"#;
+
+        let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
+        let entry = &result.get("models").unwrap().as_array().unwrap()[0];
+        assert_eq!(
+            entry.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(
+            entry.get("displayName").and_then(|v| v.as_str()),
+            Some("DeepSeek V4 Pro")
+        );
+        assert_eq!(
+            entry.get("contextWindow").and_then(|v| v.as_u64()),
+            Some(128_000),
+            "portable exports must preserve explicit values even when they match live defaults"
+        );
+        assert_eq!(
+            entry.get("routeMode").and_then(|v| v.as_str()),
+            Some("chat")
         );
     }
 
