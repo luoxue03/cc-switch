@@ -3686,6 +3686,33 @@ pub fn apply_codex_official_proxy_route(
     Ok(doc.to_string())
 }
 
+/// Disable Responses WebSocket transport on the active custom provider while
+/// its base URL points at CC Switch's HTTP/SSE-only local proxy.
+pub fn disable_codex_websockets_for_active_provider(
+    config_text: &str,
+) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let Some(provider_id) = active_codex_model_provider_id(&doc) else {
+        return Ok(config_text.to_string());
+    };
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return Ok(config_text.to_string());
+    }
+    let Some(provider_table) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|providers| providers.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return Ok(config_text.to_string());
+    };
+
+    provider_table.insert("supports_websockets", toml_edit::value(false));
+    Ok(doc.to_string())
+}
+
 /// Whether a live Codex config is the official route projected by CC Switch.
 pub fn codex_config_has_official_proxy_route(config_text: &str) -> bool {
     if !config_text.contains(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID) {
@@ -4656,6 +4683,38 @@ command = "example"
             Some(false)
         );
         assert!(codex_config_has_official_proxy_route(&output));
+    }
+
+    #[test]
+    fn local_proxy_disables_websockets_only_on_active_custom_provider() {
+        let input = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "AxonHub"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+supports_websockets = true
+
+[model_providers.other]
+name = "Other"
+supports_websockets = true
+"#;
+
+        let output = disable_codex_websockets_for_active_provider(input).expect("disable ws");
+        let doc: toml::Value = toml::from_str(&output).expect("parse output");
+
+        assert_eq!(
+            doc["model_providers"]["custom"]
+                .get("supports_websockets")
+                .and_then(toml::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            doc["model_providers"]["other"]
+                .get("supports_websockets")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
     }
 
     #[test]

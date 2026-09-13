@@ -1635,7 +1635,10 @@ impl RequestForwarder {
         } else {
             let mut mapped_body = mapped_body;
             if matches!(app_type, AppType::Codex) {
-                super::providers::sanitize_codex_responses_passthrough_body(&mut mapped_body);
+                super::providers::sanitize_codex_responses_passthrough_body(
+                    &mut mapped_body,
+                    provider,
+                );
             }
             mapped_body
         };

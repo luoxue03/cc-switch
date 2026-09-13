@@ -3439,6 +3439,8 @@ impl ProxyService {
         let mut updated =
             crate::codex_config::update_codex_toml_field(&updated, "wire_api", "responses")
                 .map_err(|e| format!("更新 Codex wire_api 失败: {e}"))?;
+        updated = crate::codex_config::disable_codex_websockets_for_active_provider(&updated)
+            .map_err(|e| format!("禁用 Codex WebSocket 传输失败: {e}"))?;
 
         if let Some(upstream_model) =
             provider.and_then(crate::proxy::providers::codex_provider_upstream_model)
@@ -4152,6 +4154,51 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("set test proxy config to an ephemeral port");
+    }
+
+    #[test]
+    fn codex_proxy_takeover_disables_websockets_on_active_provider() {
+        let provider = Provider::with_id(
+            "axonhub".to_string(),
+            "AxonHub".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "test-key" },
+                "config": ""
+            }),
+            None,
+        );
+        let input = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "AxonHub"
+base_url = "https://axonhub.example/v1"
+wire_api = "responses"
+supports_websockets = true
+"#;
+
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            input,
+            "http://127.0.0.1:15721/v1",
+            Some(&provider),
+        )
+        .expect("apply Codex proxy takeover");
+        let doc: toml::Value = toml::from_str(&output).expect("parse output");
+        let custom = &doc["model_providers"]["custom"];
+
+        assert_eq!(
+            custom.get("base_url").and_then(toml::Value::as_str),
+            Some("http://127.0.0.1:15721/v1")
+        );
+        assert_eq!(
+            custom.get("wire_api").and_then(toml::Value::as_str),
+            Some("responses")
+        );
+        assert_eq!(
+            custom
+                .get("supports_websockets")
+                .and_then(toml::Value::as_bool),
+            Some(false)
+        );
     }
 
     async fn seed_distinct_app_proxy_configs(db: &Database) -> Vec<Value> {

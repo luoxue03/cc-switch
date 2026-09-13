@@ -152,12 +152,20 @@ pub fn should_convert_codex_responses_to_chat(
     codex_provider_uses_chat_completions(provider)
 }
 
-pub fn sanitize_codex_responses_passthrough_body(body: &mut JsonValue) {
+pub fn sanitize_codex_responses_passthrough_body(body: &mut JsonValue, provider: &Provider) {
     let Some(input) = body.get_mut("input").and_then(|value| value.as_array_mut()) else {
         return;
     };
 
+    let strip_internal_metadata = !is_codex_official_provider(provider);
+
     input.retain(|item| {
+        if strip_internal_metadata {
+            if let Some(item) = item.as_object_mut() {
+                item.remove("internal_chat_message_metadata_passthrough");
+            }
+        }
+
         let item_type = item.get("type").and_then(|value| value.as_str());
         match item_type {
             Some("function_call") | Some("custom_tool_call") | Some("tool_search_call") => {
@@ -2495,7 +2503,10 @@ wire_api = "responses"
             ]
         });
 
-        sanitize_codex_responses_passthrough_body(&mut body);
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1"
+        }));
+        sanitize_codex_responses_passthrough_body(&mut body, &provider);
 
         let input = body.get("input").and_then(|value| value.as_array()).unwrap();
         assert_eq!(input.len(), 3);
@@ -2508,5 +2519,69 @@ wire_api = "responses"
             input[2].get("call_id").and_then(|v| v.as_str()),
             Some("call_read")
         );
+    }
+
+    #[test]
+    fn test_sanitize_codex_responses_passthrough_body_strips_internal_item_metadata() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1"
+        }));
+        let mut body = json!({
+            "model": "GPT-6-Astra",
+            "internal_chat_message_metadata_passthrough": { "keep": true },
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "hi",
+                    "internal_chat_message_metadata_passthrough": {
+                        "content_item_kinds": ["message"]
+                    }
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_read",
+                    "output": "ok",
+                    "internal_chat_message_metadata_passthrough": null
+                }
+            ]
+        });
+
+        sanitize_codex_responses_passthrough_body(&mut body, &provider);
+
+        let input = body.get("input").and_then(JsonValue::as_array).unwrap();
+        assert!(input.iter().all(|item| item
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none()));
+        assert_eq!(
+            input[0].get("content").and_then(JsonValue::as_str),
+            Some("hi")
+        );
+        assert!(body
+            .get("internal_chat_message_metadata_passthrough")
+            .is_some());
+    }
+
+    #[test]
+    fn test_sanitize_codex_responses_passthrough_body_preserves_official_item_metadata() {
+        let mut provider = create_provider(json!({ "auth": {} }));
+        provider.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        provider.category = Some("official".to_string());
+        let mut body = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "hi",
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["message"]
+                }
+            }]
+        });
+
+        sanitize_codex_responses_passthrough_body(&mut body, &provider);
+
+        assert!(body["input"][0]
+            .get("internal_chat_message_metadata_passthrough")
+            .is_some());
     }
 }
