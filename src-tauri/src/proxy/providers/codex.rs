@@ -159,7 +159,7 @@ pub fn sanitize_codex_responses_passthrough_body(body: &mut JsonValue, provider:
 
     let strip_internal_metadata = !is_codex_official_provider(provider);
 
-    input.retain(|item| {
+    input.retain_mut(|item| {
         if strip_internal_metadata {
             if let Some(item) = item.as_object_mut() {
                 item.remove("internal_chat_message_metadata_passthrough");
