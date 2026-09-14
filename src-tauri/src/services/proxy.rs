@@ -3436,6 +3436,12 @@ impl ProxyService {
 
         let updated = crate::codex_config::update_codex_toml_field(toml_str, "base_url", proxy_url)
             .map_err(|e| format!("更新 Codex 代理地址失败: {e}"))?;
+        // An unset/built-in OpenAI route is first expressed as
+        // `openai_base_url`. Normalize it before applying provider-scoped
+        // takeover fields so the first projection is identical to repeats.
+        let updated = crate::codex_config::normalize_codex_legacy_openai_reroute(&updated)
+            .map_err(|e| format!("规范化 Codex 代理路由失败: {e}"))?
+            .unwrap_or(updated);
         let mut updated =
             crate::codex_config::update_codex_toml_field(&updated, "wire_api", "responses")
                 .map_err(|e| format!("更新 Codex wire_api 失败: {e}"))?;
@@ -7246,6 +7252,7 @@ requires_openai_auth = true
             let table = &doc["model_providers"][id];
             assert_eq!(table["base_url"].as_str(), Some(url));
             assert_eq!(table["wire_api"].as_str(), Some("responses"));
+            assert_eq!(table["supports_websockets"].as_bool(), Some(false));
             assert_eq!(table["experimental_bearer_token"].as_str(), Some(PROXY_TOKEN_PLACEHOLDER));
             if input.contains("Existing") {
                 assert_eq!(doc["model_providers"]["cc-switch"]["base_url"].as_str(), Some("https://keep.example/v1"));

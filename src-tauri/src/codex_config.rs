@@ -3293,7 +3293,9 @@ fn preflight_codex_provider_table_conflicts(config_text: &str) -> Result<(), App
 /// so the key needs a provider-scoped slot. The built-in `openai` provider
 /// speaks the Responses wire protocol, so the table pins
 /// `wire_api = "responses"` and traffic semantics stay unchanged.
-fn normalize_codex_legacy_openai_reroute(config_text: &str) -> Result<Option<String>, AppError> {
+pub(crate) fn normalize_codex_legacy_openai_reroute(
+    config_text: &str,
+) -> Result<Option<String>, AppError> {
     if !config_text.contains("openai_base_url") {
         return Ok(None);
     }
