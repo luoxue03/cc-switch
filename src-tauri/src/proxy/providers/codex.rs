@@ -174,45 +174,48 @@ pub fn sanitize_codex_responses_passthrough_body(
         sanitize_overlong_responses_item_id(item, index)?;
     }
 
-    input.retain(|item| {
-        let item_type = item.get("type").and_then(|value| value.as_str());
-        match item_type {
-            Some("function_call") | Some("custom_tool_call") => {
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .trim();
-                let name = item
-                    .get("name")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .trim();
-                !call_id.is_empty() && !name.is_empty()
-            }
-            Some("tool_search_call") => {
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .trim();
-                !call_id.is_empty()
-            }
-            Some("function_call_output")
-            | Some("custom_tool_call_output")
-            | Some("tool_search_output") => {
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .trim();
-                !call_id.is_empty()
-            }
-            _ => true,
-        }
-    });
+    input.retain(|item| !is_invalid_codex_responses_tool_history_item(item));
 
     Ok(())
+}
+
+fn is_invalid_codex_responses_tool_history_item(item: &JsonValue) -> bool {
+    let item_type = item.get("type").and_then(|value| value.as_str());
+    let is_tool_call = matches!(
+        item_type,
+        Some("function_call") | Some("custom_tool_call") | Some("tool_search_call")
+    );
+    let is_tool_output = matches!(
+        item_type,
+        Some("function_call_output")
+            | Some("custom_tool_call_output")
+            | Some("tool_search_output")
+    );
+
+    if !is_tool_call && !is_tool_output {
+        return false;
+    }
+
+    let has_valid_call_id = item
+        .get("call_id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_valid_call_id {
+        return true;
+    }
+
+    if matches!(
+        item_type,
+        Some("function_call") | Some("custom_tool_call")
+    ) {
+        let has_valid_name = item
+            .get("name")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty());
+        return !has_valid_name;
+    }
+
+    false
 }
 
 fn sanitize_overlong_responses_item_id(
@@ -2588,6 +2591,7 @@ wire_api = "responses"
                 { "type": "message", "role": "user", "content": "hi" },
                 { "type": "function_call", "call_id": "", "name": "", "arguments": "{}" },
                 { "type": "function_call_output", "call_id": "", "output": "unsupported call: " },
+                { "type": "function_call", "call_id": "call_missing_name", "name": "", "arguments": "{}" },
                 { "type": "function_call", "call_id": "call_read", "name": "read_file", "arguments": "{}" },
                 { "type": "function_call_output", "call_id": "call_read", "output": "ok" }
             ]
@@ -2630,6 +2634,7 @@ wire_api = "responses"
                     "id": "ts_123",
                     "call_id": "call_search",
                     "arguments": { "query": "calendar" },
+                    "execution": "client",
                     "status": "completed"
                 },
                 {
@@ -2764,15 +2769,17 @@ wire_api = "responses"
                     "type": "tool_search_call",
                     "id": long_id("tsc"),
                     "call_id": "call_search",
-                    "name": "tool_search",
-                    "arguments": {"query": "calendar"}
+                    "arguments": {"query": "calendar"},
+                    "execution": "client",
+                    "status": "completed"
                 },
                 {
                     "type": "tool_search_output",
                     "id": long_id("tso"),
                     "call_id": "call_search",
+                    "execution": "server",
                     "status": "completed",
-                    "output": []
+                    "tools": []
                 },
                 {
                     "type": "reasoning",
