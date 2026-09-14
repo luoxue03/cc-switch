@@ -432,14 +432,8 @@ impl CodexCatalogToolProfile {
     fn from_route_mode(route_mode: Option<&str>) -> Option<Self> {
         match route_mode?.trim().to_ascii_lowercase().as_str() {
             "chat" | "openai_chat" | "openai-chat" => Some(Self::ProxyChat),
-            "responses" | "openai_responses" | "openai-responses" => {
-                Some(Self::NativeResponses)
-            }
-            "anthropic"
-            | "anthropic_messages"
-            | "anthropic-messages"
-            | "claude"
-            | "messages" => {
+            "responses" | "openai_responses" | "openai-responses" => Some(Self::NativeResponses),
+            "anthropic" | "anthropic_messages" | "anthropic-messages" | "claude" | "messages" => {
                 Some(Self::Anthropic)
             }
             _ => None,
@@ -1604,10 +1598,7 @@ fn apply_codex_routed_reasoning_default(
         .as_deref()
         .filter(|level| CODEX_ROUTED_REASONING_LEVELS.contains(level))
         .unwrap_or(CODEX_ROUTED_DEFAULT_REASONING_LEVEL);
-    entry_obj.insert(
-        "default_reasoning_level".to_string(),
-        json!(default_level),
-    );
+    entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
 }
 
 fn codex_catalog_model_entry(
@@ -2340,8 +2331,9 @@ fn codex_model_catalog_from_specs(
             }
             let template = match profile {
                 CodexCatalogToolProfile::ProxyChat => proxy_chat_template,
-                CodexCatalogToolProfile::NativeResponses
-                | CodexCatalogToolProfile::Anthropic => native_template,
+                CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::Anthropic => {
+                    native_template
+                }
             };
             codex_catalog_model_entry(template, spec, index, profile, default_context_window)
         })
@@ -2483,9 +2475,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
     let all_catalog_models_anthropic = !catalog_specs.is_empty()
         && catalog_specs
             .iter()
-            .all(|spec| {
-                spec.tool_profile.unwrap_or(profile) == CodexCatalogToolProfile::Anthropic
-            });
+            .all(|spec| spec.tool_profile.unwrap_or(profile) == CodexCatalogToolProfile::Anthropic);
 
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
@@ -2685,8 +2675,8 @@ pub(crate) fn resolve_cc_switch_catalog_path(
 fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) -> Option<Value> {
     let catalog: Value = serde_json::from_str(catalog_text).ok()?;
     let models = catalog.get("models").and_then(|m| m.as_array())?;
-    let is_cc_switch_export = catalog.get("format").and_then(|v| v.as_str())
-        == Some("cc-switch-model-mapping");
+    let is_cc_switch_export =
+        catalog.get("format").and_then(|v| v.as_str()) == Some("cc-switch-model-mapping");
 
     let default_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
@@ -2757,10 +2747,7 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             .map(str::trim)
             .filter(|text| !text.is_empty())
         {
-            obj.insert(
-                "baseInstructions".to_string(),
-                json!(base_instructions),
-            );
+            obj.insert("baseInstructions".to_string(), json!(base_instructions));
         }
         if let Some(reasoning_levels) = entry
             .get("reasoningLevels")
@@ -2771,11 +2758,9 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
                 levels
                     .iter()
                     .filter_map(|level| {
-                        level.as_str().or_else(|| {
-                            level
-                                .get("effort")
-                                .and_then(|effort| effort.as_str())
-                        })
+                        level
+                            .as_str()
+                            .or_else(|| level.get("effort").and_then(|effort| effort.as_str()))
                     })
                     .map(str::trim)
                     .filter(|level| !level.is_empty())
@@ -3724,9 +3709,7 @@ pub fn apply_codex_official_proxy_route(
 
 /// Disable Responses WebSocket transport on the active custom provider while
 /// its base URL points at CC Switch's HTTP/SSE-only local proxy.
-pub fn disable_codex_websockets_for_active_provider(
-    config_text: &str,
-) -> Result<String, AppError> {
+pub fn disable_codex_websockets_for_active_provider(config_text: &str) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
@@ -7556,12 +7539,7 @@ base_url = "https://production.api/v1"
             CodexCatalogToolProfile::Anthropic,
         ] {
             let catalog = codex_model_catalog_from_specs(
-                &specs,
-                &template,
-                &template,
-                profile,
-                128_000,
-                None,
+                &specs, &template, &template, profile, 128_000, None,
             );
             let models = catalog["models"].as_array().expect("models array");
             let modalities = |slug: &str| {
@@ -7926,7 +7904,9 @@ model_catalog_json = "/Users/me/.codex/my-custom-catalog.json"
         let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert_eq!(
-            parsed.get("model_catalog_json").and_then(|value| value.as_str()),
+            parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str()),
             Some("/Users/me/.codex/my-custom-catalog.json")
         );
     }
@@ -7941,7 +7921,9 @@ model_catalog_json = "my-custom-catalog.json"
         let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert_eq!(
-            parsed.get("model_catalog_json").and_then(|value| value.as_str()),
+            parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str()),
             Some("my-custom-catalog.json")
         );
     }
@@ -8348,9 +8330,7 @@ web_search = "disabled"
             Some(&json!(["low", "high", "max"]))
         );
         assert_eq!(
-            entry
-                .get("defaultReasoningLevel")
-                .and_then(|v| v.as_str()),
+            entry.get("defaultReasoningLevel").and_then(|v| v.as_str()),
             Some("high")
         );
     }
@@ -8371,14 +8351,9 @@ web_search = "disabled"
         let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
         let entry = &result.get("models").unwrap().as_array().unwrap()[0];
 
+        assert_eq!(entry.get("reasoningLevels"), Some(&json!(["low", "high"])));
         assert_eq!(
-            entry.get("reasoningLevels"),
-            Some(&json!(["low", "high"]))
-        );
-        assert_eq!(
-            entry
-                .get("defaultReasoningLevel")
-                .and_then(|v| v.as_str()),
+            entry.get("defaultReasoningLevel").and_then(|v| v.as_str()),
             Some("high")
         );
     }

@@ -187,9 +187,7 @@ fn is_invalid_codex_responses_tool_history_item(item: &JsonValue) -> bool {
     );
     let is_tool_output = matches!(
         item_type,
-        Some("function_call_output")
-            | Some("custom_tool_call_output")
-            | Some("tool_search_output")
+        Some("function_call_output") | Some("custom_tool_call_output") | Some("tool_search_output")
     );
 
     if !is_tool_call && !is_tool_output {
@@ -204,10 +202,7 @@ fn is_invalid_codex_responses_tool_history_item(item: &JsonValue) -> bool {
         return true;
     }
 
-    if matches!(
-        item_type,
-        Some("function_call") | Some("custom_tool_call")
-    ) {
+    if matches!(item_type, Some("function_call") | Some("custom_tool_call")) {
         let has_valid_name = item
             .get("name")
             .and_then(|value| value.as_str())
