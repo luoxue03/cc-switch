@@ -1638,7 +1638,7 @@ impl RequestForwarder {
                 super::providers::sanitize_codex_responses_passthrough_body(
                     &mut mapped_body,
                     provider,
-                );
+                )?;
             }
             mapped_body
         };

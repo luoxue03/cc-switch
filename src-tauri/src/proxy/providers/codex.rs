@@ -19,6 +19,8 @@ use toml::Value as TomlValue;
 static CODEX_CLIENT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(codex_vscode|codex_cli_rs)/[\d.]+").unwrap());
 
+const MAX_RESPONSES_ITEM_ID_LEN: usize = 64;
+
 /// Codex 适配器
 pub struct CodexAdapter;
 
@@ -152,20 +154,27 @@ pub fn should_convert_codex_responses_to_chat(
     codex_provider_uses_chat_completions(provider)
 }
 
-pub fn sanitize_codex_responses_passthrough_body(body: &mut JsonValue, provider: &Provider) {
+pub fn sanitize_codex_responses_passthrough_body(
+    body: &mut JsonValue,
+    provider: &Provider,
+) -> Result<(), ProxyError> {
     let Some(input) = body.get_mut("input").and_then(|value| value.as_array_mut()) else {
-        return;
+        return Ok(());
     };
 
     let strip_internal_metadata = !is_codex_official_provider(provider);
 
-    input.retain_mut(|item| {
+    for (index, item) in input.iter_mut().enumerate() {
         if strip_internal_metadata {
             if let Some(item) = item.as_object_mut() {
                 item.remove("internal_chat_message_metadata_passthrough");
             }
         }
 
+        sanitize_overlong_responses_item_id(item, index)?;
+    }
+
+    input.retain(|item| {
         let item_type = item.get("type").and_then(|value| value.as_str());
         match item_type {
             Some("function_call") | Some("custom_tool_call") | Some("tool_search_call") => {
@@ -181,7 +190,9 @@ pub fn sanitize_codex_responses_passthrough_body(body: &mut JsonValue, provider:
                     .trim();
                 !call_id.is_empty() && !name.is_empty()
             }
-            Some("function_call_output") | Some("custom_tool_call_output") | Some("tool_search_output") => {
+            Some("function_call_output")
+            | Some("custom_tool_call_output")
+            | Some("tool_search_output") => {
                 let call_id = item
                     .get("call_id")
                     .and_then(|value| value.as_str())
@@ -192,6 +203,74 @@ pub fn sanitize_codex_responses_passthrough_body(body: &mut JsonValue, provider:
             _ => true,
         }
     });
+
+    Ok(())
+}
+
+fn sanitize_overlong_responses_item_id(
+    item: &mut JsonValue,
+    index: usize,
+) -> Result<(), ProxyError> {
+    let Some(object) = item.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(id) = object.get("id").and_then(JsonValue::as_str) else {
+        return Ok(());
+    };
+    let original_len = id.chars().count();
+    if original_len <= MAX_RESPONSES_ITEM_ID_LEN {
+        return Ok(());
+    }
+
+    let item_type = object
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("<missing>")
+        .to_string();
+    let removable_id = matches!(
+        item_type.as_str(),
+        "message"
+            | "function_call"
+            | "custom_tool_call"
+            | "tool_search_call"
+            | "function_call_output"
+            | "custom_tool_call_output"
+            | "tool_search_output"
+            | "compaction"
+            | "compaction_summary"
+            | "context_compaction"
+    );
+    let reasoning_has_encrypted_content = item_type == "reasoning"
+        && object
+            .get("encrypted_content")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|content| !content.trim().is_empty());
+
+    if removable_id || reasoning_has_encrypted_content {
+        object.remove("id");
+        log::warn!(
+            "[Codex] Sanitized overlong Responses item ID (input_index={}, item_type={}, original_len={}, action=remove_optional_id)",
+            index,
+            item_type,
+            original_len
+        );
+        return Ok(());
+    }
+
+    let reason = match item_type.as_str() {
+        "reasoning" => "reasoning item has no complete encrypted_content",
+        "item_reference" => "item_reference points to an upstream-stored object",
+        _ => "item type has no verified optional ID contract",
+    };
+    log::warn!(
+        "[Codex] Rejected overlong Responses item ID (input_index={}, item_type={}, original_len={}, action=reject_unsafe_rewrite)",
+        index,
+        item_type,
+        original_len
+    );
+    Err(ProxyError::InvalidRequest(format!(
+        "Codex Responses compatibility check rejected input[{index}] (type={item_type}): id length {original_len} exceeds {MAX_RESPONSES_ITEM_ID_LEN}; {reason}"
+    )))
 }
 
 /// Whether a converted Codex Responses request may send `prompt_cache_key` to
@@ -2487,7 +2566,10 @@ wire_api = "responses"
         let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
 
         assert_eq!(upstream_model.as_deref(), Some("deepseek4pro"));
-        assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("deepseek4pro"));
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("deepseek4pro")
+        );
     }
 
     #[test]
@@ -2506,11 +2588,17 @@ wire_api = "responses"
         let provider = create_provider(json!({
             "base_url": "https://api.axonhub.example/v1"
         }));
-        sanitize_codex_responses_passthrough_body(&mut body, &provider);
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
 
-        let input = body.get("input").and_then(|value| value.as_array()).unwrap();
+        let input = body
+            .get("input")
+            .and_then(|value| value.as_array())
+            .unwrap();
         assert_eq!(input.len(), 3);
-        assert_eq!(input[0].get("type").and_then(|v| v.as_str()), Some("message"));
+        assert_eq!(
+            input[0].get("type").and_then(|v| v.as_str()),
+            Some("message")
+        );
         assert_eq!(
             input[1].get("call_id").and_then(|v| v.as_str()),
             Some("call_read")
@@ -2547,7 +2635,7 @@ wire_api = "responses"
             ]
         });
 
-        sanitize_codex_responses_passthrough_body(&mut body, &provider);
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
 
         let input = body.get("input").and_then(JsonValue::as_array).unwrap();
         assert!(input.iter().all(|item| item
@@ -2578,10 +2666,156 @@ wire_api = "responses"
             }]
         });
 
-        sanitize_codex_responses_passthrough_body(&mut body, &provider);
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
 
         assert!(body["input"][0]
             .get("internal_chat_message_metadata_passthrough")
             .is_some());
+    }
+
+    #[test]
+    fn test_sanitize_codex_responses_passthrough_body_removes_overlong_optional_ids() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1"
+        }));
+        let long_id = |prefix: &str| format!("{prefix}_{}", "x".repeat(80));
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "message",
+                    "id": long_id("msg"),
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello"}]
+                },
+                {
+                    "type": "function_call",
+                    "id": long_id("fc"),
+                    "call_id": "call_function",
+                    "name": "lookup",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "id": long_id("fco"),
+                    "call_id": "call_function",
+                    "status": "completed",
+                    "output": "tool body"
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": long_id("ctc"),
+                    "call_id": "call_custom",
+                    "name": "render",
+                    "input": "draw"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "id": long_id("ctco"),
+                    "call_id": "call_custom",
+                    "status": "completed",
+                    "output": "custom body"
+                },
+                {
+                    "type": "tool_search_call",
+                    "id": long_id("tsc"),
+                    "call_id": "call_search",
+                    "name": "tool_search",
+                    "arguments": {"query": "calendar"}
+                },
+                {
+                    "type": "tool_search_output",
+                    "id": long_id("tso"),
+                    "call_id": "call_search",
+                    "status": "completed",
+                    "output": []
+                },
+                {
+                    "type": "reasoning",
+                    "id": long_id("rs"),
+                    "summary": [],
+                    "encrypted_content": "encrypted-reasoning"
+                },
+                {
+                    "type": "compaction",
+                    "id": long_id("cmp"),
+                    "encrypted_content": "encrypted-compaction"
+                }
+            ]
+        });
+
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
+
+        let input = body["input"].as_array().unwrap();
+        assert!(input.iter().all(|item| item.get("id").is_none()));
+        assert_eq!(input[1]["call_id"], "call_function");
+        assert_eq!(input[2]["call_id"], "call_function");
+        assert_eq!(input[2]["output"], "tool body");
+        assert_eq!(input[4]["call_id"], "call_custom");
+        assert_eq!(input[4]["output"], "custom body");
+        assert_eq!(input[6]["call_id"], "call_search");
+        assert_eq!(input[7]["encrypted_content"], "encrypted-reasoning");
+        assert_eq!(input[8]["encrypted_content"], "encrypted-compaction");
+    }
+
+    #[test]
+    fn test_sanitize_codex_responses_passthrough_body_preserves_valid_ids() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1"
+        }));
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "message",
+                    "id": "msg_valid",
+                    "role": "assistant",
+                    "content": []
+                },
+                {
+                    "type": "reasoning",
+                    "id": format!("rs_{}", "x".repeat(61)),
+                    "summary": [],
+                    "encrypted_content": "encrypted-reasoning"
+                }
+            ]
+        });
+        let original = body.clone();
+
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
+
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn test_sanitize_codex_responses_passthrough_body_rejects_unsafe_overlong_ids() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1"
+        }));
+        let cases = [
+            (
+                json!({
+                    "type": "reasoning",
+                    "id": format!("rs_{}", "x".repeat(80)),
+                    "summary": []
+                }),
+                "no complete encrypted_content",
+            ),
+            (
+                json!({
+                    "type": "item_reference",
+                    "id": format!("item_{}", "x".repeat(80))
+                }),
+                "upstream-stored object",
+            ),
+        ];
+
+        for (item, expected_reason) in cases {
+            let mut body = json!({"input": [item]});
+            let error = sanitize_codex_responses_passthrough_body(&mut body, &provider)
+                .expect_err("unsafe overlong IDs must fail locally");
+
+            assert!(matches!(&error, ProxyError::InvalidRequest(_)));
+            assert!(error.to_string().contains(expected_reason));
+            assert!(!error.to_string().contains(&"x".repeat(65)));
+        }
     }
 }

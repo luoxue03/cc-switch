@@ -44,6 +44,7 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 
 const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
 const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
+const INTERNAL_CHAT_MESSAGE_METADATA_FIELD: &str = "internal_chat_message_metadata_passthrough";
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
 const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
@@ -699,9 +700,12 @@ fn append_responses_item_as_chat_message(
                 last_assistant_index,
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-            let media_plan = item
-                .get("output")
-                .cloned()
+            let mut sanitized_output = item.get("output").cloned();
+            if let Some(output) = sanitized_output.as_mut() {
+                strip_internal_chat_metadata_from_tool_output(output);
+            }
+            let media_plan = sanitized_output
+                .clone()
                 .and_then(plan_chat_tool_output_media);
             let output = if let Some(media_plan) = media_plan {
                 queue_chat_tool_output_media(pending_media, call_id, media_plan.media_parts);
@@ -709,7 +713,7 @@ fn append_responses_item_as_chat_message(
             } else {
                 // Cache-sensitive no-media fallback: keep these expressions
                 // byte-for-byte equivalent to the pre-fix conversion.
-                match item.get("output") {
+                match sanitized_output.as_ref() {
                     Some(Value::String(s)) => canonicalize_json_string_if_parseable(s),
                     Some(v) => canonical_json_string(v),
                     None => String::new(),
@@ -731,6 +735,9 @@ fn append_responses_item_as_chat_message(
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
             let mut transformed_item = item.clone();
+            if let Some(output) = transformed_item.get_mut("output") {
+                strip_internal_chat_metadata_from_tool_output(output);
+            }
             let replacement_block = json!({
                 "type": "text",
                 "text": TOOL_RESULT_MEDIA_MOVED_MARKER
@@ -748,13 +755,10 @@ fn append_responses_item_as_chat_message(
                     )
                 })
                 .unwrap_or(0);
-            let output = if replaced > 0 {
+            if replaced > 0 {
                 queue_chat_tool_output_media(pending_media, call_id, media_parts);
-                canonical_json_string(&transformed_item)
-            } else {
-                // Preserve the legacy whole-item representation exactly.
-                canonical_json_string(item)
-            };
+            }
+            let output = canonical_json_string(&transformed_item);
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call_id,
@@ -990,6 +994,39 @@ fn attach_pending_reasoning_to_assistant_unique(
     };
     if let Some(obj) = message.as_object_mut() {
         obj.insert("reasoning_content".to_string(), Value::String(merged));
+    }
+}
+
+/// Remove Codex-only, request-volatile metadata when a tool result embeds it
+/// directly in its output object. JSON strings are rewritten only when that
+/// exact top-level field is present; ordinary text and nested user data stay
+/// byte-for-byte unchanged.
+fn strip_internal_chat_metadata_from_tool_output(output: &mut Value) -> bool {
+    match output {
+        Value::Object(object) => object
+            .remove(INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+            .is_some(),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return false;
+            }
+            let Ok(mut parsed) = serde_json::from_str::<Value>(trimmed) else {
+                return false;
+            };
+            let Some(object) = parsed.as_object_mut() else {
+                return false;
+            };
+            if object
+                .remove(INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+                .is_none()
+            {
+                return false;
+            }
+            *text = canonical_json_string(&parsed);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -3570,6 +3607,144 @@ mod tests {
             "not json"
         );
         assert_eq!(messages[1]["content"], "plain text result");
+    }
+
+    #[test]
+    fn responses_request_to_chat_strips_internal_metadata_from_tool_outputs() {
+        let internal_metadata = json!({
+            "create_time": 1_789_000_000,
+            "turn_id": "turn-volatile",
+            "executed_tool_calls": [{"name": "read_file", "arguments": {}}]
+        });
+        let function_output = json!({
+            "result": "function body",
+            "nested": {
+                "internal_chat_message_metadata_passthrough": "user data"
+            },
+            "internal_chat_message_metadata_passthrough": internal_metadata
+        })
+        .to_string();
+        let result = responses_to_chat_completions(json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_function",
+                    "status": "completed",
+                    "output": function_output
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom",
+                    "status": "completed",
+                    "output": {
+                        "result": "custom body",
+                        "internal_chat_message_metadata_passthrough": internal_metadata
+                    }
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_search",
+                    "status": "completed",
+                    "output": json!({
+                        "result": "search body",
+                        "internal_chat_message_metadata_passthrough": internal_metadata
+                    }).to_string()
+                }
+            ]
+        }))
+        .unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        let function_content: Value =
+            serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(messages[0]["tool_call_id"], "call_function");
+        assert_eq!(function_content["result"], "function body");
+        assert_eq!(
+            function_content["nested"]["internal_chat_message_metadata_passthrough"],
+            "user data"
+        );
+        assert!(function_content
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+
+        let custom_item: Value =
+            serde_json::from_str(messages[1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(messages[1]["tool_call_id"], "call_custom");
+        assert_eq!(custom_item["status"], "completed");
+        assert_eq!(custom_item["output"]["result"], "custom body");
+        assert!(custom_item["output"]
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+
+        let search_item: Value =
+            serde_json::from_str(messages[2]["content"].as_str().unwrap()).unwrap();
+        let search_output: Value =
+            serde_json::from_str(search_item["output"].as_str().unwrap()).unwrap();
+        assert_eq!(messages[2]["tool_call_id"], "call_search");
+        assert_eq!(search_item["status"], "completed");
+        assert_eq!(search_output["result"], "search body");
+        assert!(search_output
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("create_time"));
+        assert!(!serialized.contains("turn-volatile"));
+        assert!(!serialized.contains("executed_tool_calls"));
+    }
+
+    #[test]
+    fn responses_request_to_chat_tool_history_is_stable_across_internal_metadata_changes() {
+        let convert = |create_time: u64, turn_id: &str| {
+            responses_to_chat_completions(json!({
+                "model": "gpt-5.4",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": "call_stable",
+                    "status": "completed",
+                    "output": json!({
+                        "result": {"ok": true},
+                        "internal_chat_message_metadata_passthrough": {
+                            "create_time": create_time,
+                            "turn_id": turn_id,
+                            "executed_tool_calls": [{
+                                "name": "read_file",
+                                "arguments": {"path": "README.md"}
+                            }]
+                        }
+                    }).to_string()
+                }]
+            }))
+            .unwrap()
+        };
+
+        let first = convert(1_789_000_001, "turn-first");
+        let second = convert(1_789_999_999, "turn-second");
+
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&second).unwrap()
+        );
+        assert_eq!(first["messages"][0]["tool_call_id"], "call_stable");
+        assert_eq!(first["messages"][0]["content"], r#"{"result":{"ok":true}}"#);
+    }
+
+    #[test]
+    fn responses_request_to_chat_does_not_rewrite_non_json_internal_metadata_text() {
+        let output = "plain internal_chat_message_metadata_passthrough text";
+        let result = responses_to_chat_completions(json!({
+            "model": "gpt-5.4",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_plain",
+                "output": output
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(result["messages"][0]["tool_call_id"], "call_plain");
+        assert_eq!(result["messages"][0]["content"], output);
     }
 
     #[test]
