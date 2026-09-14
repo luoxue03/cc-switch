@@ -177,7 +177,7 @@ pub fn sanitize_codex_responses_passthrough_body(
     input.retain(|item| {
         let item_type = item.get("type").and_then(|value| value.as_str());
         match item_type {
-            Some("function_call") | Some("custom_tool_call") | Some("tool_search_call") => {
+            Some("function_call") | Some("custom_tool_call") => {
                 let call_id = item
                     .get("call_id")
                     .and_then(|value| value.as_str())
@@ -189,6 +189,14 @@ pub fn sanitize_codex_responses_passthrough_body(
                     .unwrap_or("")
                     .trim();
                 !call_id.is_empty() && !name.is_empty()
+            }
+            Some("tool_search_call") => {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .trim();
+                !call_id.is_empty()
             }
             Some("function_call_output")
             | Some("custom_tool_call_output")
@@ -2607,6 +2615,43 @@ wire_api = "responses"
             input[2].get("call_id").and_then(|v| v.as_str()),
             Some("call_read")
         );
+    }
+
+    #[test]
+    fn test_sanitize_codex_responses_passthrough_body_preserves_tool_search_without_name() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1"
+        }));
+        let mut body = json!({
+            "model": "GPT-6-Astra",
+            "input": [
+                {
+                    "type": "tool_search_call",
+                    "id": "ts_123",
+                    "call_id": "call_search",
+                    "arguments": { "query": "calendar" },
+                    "status": "completed"
+                },
+                {
+                    "type": "tool_search_output",
+                    "id": "tso_123",
+                    "call_id": "call_search",
+                    "execution": "server",
+                    "status": "completed",
+                    "tools": []
+                }
+            ]
+        });
+
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
+
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "tool_search_call");
+        assert_eq!(input[0]["call_id"], "call_search");
+        assert!(input[0].get("name").is_none());
+        assert_eq!(input[1]["type"], "tool_search_output");
+        assert_eq!(input[1]["call_id"], "call_search");
     }
 
     #[test]
