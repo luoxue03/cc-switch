@@ -2762,6 +2762,42 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
                 json!(base_instructions),
             );
         }
+        if let Some(reasoning_levels) = entry
+            .get("reasoningLevels")
+            .or_else(|| entry.get("reasoning_levels"))
+            .or_else(|| entry.get("supported_reasoning_levels"))
+            .and_then(|v| v.as_array())
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(|level| {
+                        level.as_str().or_else(|| {
+                            level
+                                .get("effort")
+                                .and_then(|effort| effort.as_str())
+                        })
+                    })
+                    .map(str::trim)
+                    .filter(|level| !level.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|levels| !levels.is_empty())
+        {
+            obj.insert("reasoningLevels".to_string(), json!(reasoning_levels));
+        }
+        if let Some(default_reasoning_level) = entry
+            .get("defaultReasoningLevel")
+            .or_else(|| entry.get("default_reasoning_level"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|level| !level.is_empty())
+        {
+            obj.insert(
+                "defaultReasoningLevel".to_string(),
+                json!(default_reasoning_level),
+            );
+        }
         if let Some(route_mode) = entry
             .get("route_mode")
             .or_else(|| entry.get("routeMode"))
@@ -8282,7 +8318,9 @@ web_search = "disabled"
                 "displayName": "DeepSeek V4 Pro",
                 "contextWindow": "128000",
                 "routeMode": "chat",
-                "inputModalities": ["text"]
+                "inputModalities": ["text"],
+                "reasoningLevels": ["low", "high", "max"],
+                "defaultReasoningLevel": "high"
             }]
         }"#;
 
@@ -8304,6 +8342,44 @@ web_search = "disabled"
         assert_eq!(
             entry.get("routeMode").and_then(|v| v.as_str()),
             Some("chat")
+        );
+        assert_eq!(
+            entry.get("reasoningLevels"),
+            Some(&json!(["low", "high", "max"]))
+        );
+        assert_eq!(
+            entry
+                .get("defaultReasoningLevel")
+                .and_then(|v| v.as_str()),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn build_simplified_catalog_reads_native_reasoning_levels() {
+        let catalog = r#"{
+            "models": [{
+                "slug": "gpt-native",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "high", "description": "High"}
+                ],
+                "default_reasoning_level": "high"
+            }]
+        }"#;
+
+        let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
+        let entry = &result.get("models").unwrap().as_array().unwrap()[0];
+
+        assert_eq!(
+            entry.get("reasoningLevels"),
+            Some(&json!(["low", "high"]))
+        );
+        assert_eq!(
+            entry
+                .get("defaultReasoningLevel")
+                .and_then(|v| v.as_str()),
+            Some("high")
         );
     }
 

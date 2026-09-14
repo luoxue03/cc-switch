@@ -351,6 +351,44 @@ describe("providerNeedsRouting", () => {
         ),
       ).toBe(false);
     });
+
+    it("逐模型路由同时包含 Chat 时需要本地代理", () => {
+      expect(
+        providerNeedsRouting(
+          "codex",
+          mkProvider({
+            meta: { apiFormat: "openai_responses" },
+            settingsConfig: {
+              modelCatalog: {
+                models: [
+                  { model: "gpt-5.5", routeMode: "responses" },
+                  { model: "deepseek-v4-pro", routeMode: "chat" },
+                ],
+              },
+            },
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it("逐模型路由全部为 Responses 时不需要本地代理", () => {
+      expect(
+        providerNeedsRouting(
+          "codex",
+          mkProvider({
+            meta: { apiFormat: "openai_responses" },
+            settingsConfig: {
+              modelCatalog: {
+                models: [
+                  { model: "gpt-5.5", routeMode: "responses" },
+                  { model: "gpt-5.6-sol", route_mode: "responses" },
+                ],
+              },
+            },
+          }),
+        ),
+      ).toBe(false);
+    });
   });
 
   describe("Claude Desktop 路由判定", () => {

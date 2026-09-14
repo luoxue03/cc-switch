@@ -177,6 +177,8 @@ describe("CodexFormFields catalog ordering", () => {
           contextWindow: 1_000_000,
           routeMode: "chat",
           inputModalities: ["text"],
+          reasoningLevels: ["low", "high", "max"],
+          defaultReasoningLevel: "high",
         },
         {
           model: "gpt-5.5",
@@ -203,6 +205,8 @@ describe("CodexFormFields catalog ordering", () => {
           contextWindow: "1000000",
           routeMode: "chat",
           inputModalities: ["text"],
+          reasoningLevels: ["low", "high", "max"],
+          defaultReasoningLevel: "high",
         }),
         expect.objectContaining({
           model: "gpt-5.5",

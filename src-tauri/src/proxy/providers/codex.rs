@@ -248,8 +248,6 @@ fn sanitize_overlong_responses_item_id(
             | "custom_tool_call_output"
             | "tool_search_output"
             | "compaction"
-            | "compaction_summary"
-            | "context_compaction"
     );
     let reasoning_has_encrypted_content = item_type == "reasoning"
         && object
@@ -2857,6 +2855,14 @@ wire_api = "responses"
                     "id": format!("item_{}", "x".repeat(80))
                 }),
                 "upstream-stored object",
+            ),
+            (
+                json!({
+                    "type": "context_compaction",
+                    "id": format!("ctx_{}", "x".repeat(80)),
+                    "encrypted_content": "opaque"
+                }),
+                "no verified optional ID contract",
             ),
         ];
 
