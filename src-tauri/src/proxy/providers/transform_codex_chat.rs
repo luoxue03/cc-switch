@@ -1517,11 +1517,7 @@ fn flatten_root_object_union(schema: &mut Value) -> bool {
 }
 
 fn prune_unused_local_defs(schema: &mut Value) {
-    let Some(original_defs) = schema
-        .get("$defs")
-        .and_then(Value::as_object)
-        .cloned()
-    else {
+    let Some(original_defs) = schema.get("$defs").and_then(Value::as_object).cloned() else {
         return;
     };
 
@@ -1595,18 +1591,18 @@ fn collect_root_object_variants(
         if !active_refs.insert(reference.to_string()) {
             return false;
         }
-        let resolved = root
-            .pointer(pointer)
-            .is_some_and(|resolved| collect_root_object_variants(resolved, root, active_refs, variants));
+        let resolved = root.pointer(pointer).is_some_and(|resolved| {
+            collect_root_object_variants(resolved, root, active_refs, variants)
+        });
         active_refs.remove(reference);
         return resolved;
     }
 
     for union_key in ["oneOf", "anyOf"] {
         if let Some(branches) = schema.get(union_key).and_then(Value::as_array) {
-            return branches.iter().all(|branch| {
-                collect_root_object_variants(branch, root, active_refs, variants)
-            });
+            return branches
+                .iter()
+                .all(|branch| collect_root_object_variants(branch, root, active_refs, variants));
         }
     }
 
