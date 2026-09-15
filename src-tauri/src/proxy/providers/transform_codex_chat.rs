@@ -22,7 +22,7 @@ use crate::proxy::{
         TOOL_RESULT_MEDIA_MOVED_MARKER,
     },
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
@@ -1393,11 +1393,13 @@ fn serialize_tool_definition_for_description(tool: &Value) -> String {
     canonical_json_string(tool)
 }
 
-/// Normalize a function's `parameters` JSON Schema so `type` is always `"object"`.
+/// Normalize a function's `parameters` JSON Schema for Chat Completions.
 ///
 /// Some Responses tools carry `parameters: null` or `parameters: {"type": null}`,
 /// but OpenAI Chat Completions strictly requires `{"type": "object", "properties": {...}}`.
-fn normalize_function_parameters(params: Option<&Value>) -> Value {
+/// Azure additionally rejects root-level unions even when `type: "object"` is present. Flatten
+/// object-only root unions while keeping branch-specific alternatives on their properties.
+fn normalize_function_parameters(params: Option<&Value>) -> (Value, bool) {
     let mut params = match params {
         Some(Value::Object(obj)) => Value::Object(obj.clone()),
         _ => json!({"type": "object", "properties": {}}),
@@ -1410,7 +1412,240 @@ fn normalize_function_parameters(params: Option<&Value>) -> Value {
             }
         }
     }
-    params
+    let flattened_root_union = flatten_root_object_union(&mut params);
+    (params, flattened_root_union)
+}
+
+fn flatten_root_object_union(schema: &mut Value) -> bool {
+    let snapshot = schema.clone();
+    let Some(root) = snapshot.as_object() else {
+        return false;
+    };
+    let union_keys: Vec<&str> = ["oneOf", "anyOf"]
+        .into_iter()
+        .filter(|key| root.get(*key).and_then(Value::as_array).is_some())
+        .collect();
+    if union_keys.len() != 1 {
+        return false;
+    }
+    // A sibling root property/constraint combines with every union branch. Flattening such a
+    // schema would require preserving an intersection, so leave unfamiliar shapes untouched.
+    if root
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|properties| !properties.is_empty())
+        || root
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| !required.is_empty())
+        || ["allOf", "enum", "const", "not"]
+            .into_iter()
+            .any(|key| root.contains_key(key))
+    {
+        return false;
+    }
+    let union_key = union_keys[0];
+    let Some(branches) = root.get(union_key).and_then(Value::as_array) else {
+        return false;
+    };
+
+    let mut variants = Vec::new();
+    let mut active_refs = HashSet::new();
+    for branch in branches {
+        if !collect_root_object_variants(branch, &snapshot, &mut active_refs, &mut variants) {
+            return false;
+        }
+    }
+    if variants.is_empty() {
+        return false;
+    }
+
+    let mut properties = Map::new();
+    let mut required: Option<Vec<Value>> = None;
+    let mut all_disallow_additional_properties = true;
+    for variant in &variants {
+        let Some(variant_obj) = variant.as_object() else {
+            return false;
+        };
+        if let Some(variant_properties) = variant_obj.get("properties").and_then(Value::as_object) {
+            for (name, property_schema) in variant_properties {
+                match properties.get_mut(name) {
+                    Some(existing) => merge_property_schema(existing, property_schema),
+                    None => {
+                        properties.insert(name.clone(), property_schema.clone());
+                    }
+                }
+            }
+        }
+        let variant_required = variant_obj
+            .get("required")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        required = Some(match required {
+            None => variant_required,
+            Some(existing) => existing
+                .into_iter()
+                .filter(|field| variant_required.contains(field))
+                .collect(),
+        });
+        all_disallow_additional_properties &=
+            variant_obj.get("additionalProperties") == Some(&Value::Bool(false));
+    }
+
+    let Some(root) = schema.as_object_mut() else {
+        return false;
+    };
+    root.remove(union_key);
+    root.insert("type".to_string(), json!("object"));
+    root.insert("properties".to_string(), Value::Object(properties));
+    match required.filter(|fields| !fields.is_empty()) {
+        Some(fields) => {
+            root.insert("required".to_string(), Value::Array(fields));
+        }
+        None => {
+            root.remove("required");
+        }
+    }
+    if all_disallow_additional_properties {
+        root.insert("additionalProperties".to_string(), Value::Bool(false));
+    } else {
+        root.remove("additionalProperties");
+    }
+    prune_unused_local_defs(schema);
+    true
+}
+
+fn prune_unused_local_defs(schema: &mut Value) {
+    let Some(original_defs) = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return;
+    };
+
+    let mut pending_refs = Vec::new();
+    if let Some(root) = schema.as_object() {
+        for (key, value) in root {
+            if key != "$defs" {
+                collect_local_def_refs(value, &mut pending_refs);
+            }
+        }
+    }
+
+    let mut used_names = HashSet::new();
+    while let Some(reference) = pending_refs.pop() {
+        let Some(encoded_name) = reference.strip_prefix("#/$defs/") else {
+            continue;
+        };
+        let name = encoded_name.replace("~1", "/").replace("~0", "~");
+        if !used_names.insert(name.clone()) {
+            continue;
+        }
+        if let Some(definition) = original_defs.get(&name) {
+            collect_local_def_refs(definition, &mut pending_refs);
+        }
+    }
+
+    let retained_defs: Map<String, Value> = original_defs
+        .into_iter()
+        .filter(|(name, _)| used_names.contains(name))
+        .collect();
+    if let Some(root) = schema.as_object_mut() {
+        if retained_defs.is_empty() {
+            root.remove("$defs");
+        } else {
+            root.insert("$defs".to_string(), Value::Object(retained_defs));
+        }
+    }
+}
+
+fn collect_local_def_refs(value: &Value, references: &mut Vec<String>) {
+    match value {
+        Value::Object(obj) => {
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
+                if reference.starts_with("#/$defs/") {
+                    references.push(reference.to_string());
+                }
+            }
+            for child in obj.values() {
+                collect_local_def_refs(child, references);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_local_def_refs(item, references);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_root_object_variants(
+    schema: &Value,
+    root: &Value,
+    active_refs: &mut HashSet<String>,
+    variants: &mut Vec<Value>,
+) -> bool {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let Some(pointer) = reference.strip_prefix('#') else {
+            return false;
+        };
+        if !active_refs.insert(reference.to_string()) {
+            return false;
+        }
+        let resolved = root
+            .pointer(pointer)
+            .is_some_and(|resolved| collect_root_object_variants(resolved, root, active_refs, variants));
+        active_refs.remove(reference);
+        return resolved;
+    }
+
+    for union_key in ["oneOf", "anyOf"] {
+        if let Some(branches) = schema.get(union_key).and_then(Value::as_array) {
+            return branches.iter().all(|branch| {
+                collect_root_object_variants(branch, root, active_refs, variants)
+            });
+        }
+    }
+
+    if schema.get("type").and_then(Value::as_str) == Some("null") {
+        return true;
+    }
+    if schema.get("type").and_then(Value::as_str) == Some("object") {
+        variants.push(schema.clone());
+        return true;
+    }
+    false
+}
+
+fn merge_property_schema(existing: &mut Value, incoming: &Value) {
+    if existing == incoming {
+        return;
+    }
+
+    let mut alternatives = Vec::new();
+    append_property_alternatives(&mut alternatives, existing);
+    append_property_alternatives(&mut alternatives, incoming);
+    *existing = json!({"anyOf": alternatives});
+}
+
+fn append_property_alternatives(alternatives: &mut Vec<Value>, schema: &Value) {
+    let nested_any_of = schema
+        .as_object()
+        .filter(|obj| obj.len() == 1)
+        .and_then(|obj| obj.get("anyOf"))
+        .and_then(Value::as_array);
+    if let Some(items) = nested_any_of {
+        for item in items {
+            append_property_alternatives(alternatives, item);
+        }
+        return;
+    }
+    if !alternatives.contains(schema) {
+        alternatives.push(schema.clone());
+    }
 }
 
 fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option<Value> {
@@ -1428,24 +1663,33 @@ fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option
             .and_then(|value| value.as_object_mut())
         {
             // Ensure parameters.type is "object" for strict OpenAI-compatible providers
-            let parameters = normalize_function_parameters(obj.get("parameters"));
+            let (parameters, flattened_root_union) =
+                normalize_function_parameters(obj.get("parameters"));
             obj.insert("parameters".to_string(), parameters);
 
             obj.insert("name".to_string(), json!(chat_name));
             if let Some(strict) = tool.get("strict").cloned() {
                 obj.entry("strict".to_string()).or_insert(strict);
             }
+            if flattened_root_union && obj.get("strict") == Some(&Value::Bool(true)) {
+                obj.insert("strict".to_string(), Value::Bool(false));
+            }
         }
         return Some(chat_tool);
     }
 
+    let (parameters, flattened_root_union) =
+        normalize_function_parameters(tool.get("parameters"));
     let mut function = json!({
         "name": chat_name,
         "description": tool.get("description").cloned().unwrap_or(Value::Null),
-        "parameters": normalize_function_parameters(tool.get("parameters"))
+        "parameters": parameters
     });
     if let Some(strict) = tool.get("strict") {
         function["strict"] = strict.clone();
+    }
+    if flattened_root_union && function.get("strict") == Some(&Value::Bool(true)) {
+        function["strict"] = Value::Bool(false);
     }
 
     Some(json!({
@@ -2531,12 +2775,13 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_to_chat_defaults_top_level_one_of_tool_parameters_to_object() {
+    fn responses_request_to_chat_flattens_top_level_one_of_tool_parameters() {
         let input = json!({
             "model": "gpt-5.4",
             "tools": [{
                 "type": "function",
                 "name": "lookup",
+                "strict": true,
                 "parameters": {
                     "oneOf": [
                         {
@@ -2557,19 +2802,157 @@ mod tests {
         let parameters = &result["tools"][0]["function"]["parameters"];
 
         assert_eq!(parameters["type"], "object");
-        assert_eq!(
-            parameters["oneOf"],
-            json!([
-                {
+        assert!(parameters.get("oneOf").is_none());
+        assert_eq!(parameters["properties"]["id"]["type"], "string");
+        assert_eq!(parameters["properties"]["slug"]["type"], "string");
+        assert_eq!(result["tools"][0]["function"]["strict"], false);
+    }
+
+    #[test]
+    fn responses_request_to_chat_flattens_automation_update_ref_unions() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "tools": [{
+                "type": "function",
+                "name": "mcp__codex_app__automation_update",
+                "strict": true,
+                "parameters": {
                     "type": "object",
-                    "properties": {"id": {"type": "string"}}
-                },
-                {
-                    "type": "object",
-                    "properties": {"slug": {"type": "string"}}
+                    "$defs": {
+                        "view": {
+                            "type": "object",
+                            "required": ["mode", "id"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "mode": {"type": "string", "enum": ["view"]}
+                            },
+                            "additionalProperties": false
+                        },
+                        "create_group": {
+                            "oneOf": [
+                                {"$ref": "#/$defs/create_cron"},
+                                {"$ref": "#/$defs/create_heartbeat"}
+                            ]
+                        },
+                        "create_cron": {
+                            "type": "object",
+                            "required": ["mode", "kind", "name"],
+                            "properties": {
+                                "mode": {"$ref": "#/$defs/create_mode"},
+                                "kind": {"type": "string", "enum": ["cron"]},
+                                "name": {"type": "string"}
+                            },
+                            "additionalProperties": false
+                        },
+                        "create_heartbeat": {
+                            "type": "object",
+                            "required": ["mode", "kind", "name"],
+                            "properties": {
+                                "mode": {"$ref": "#/$defs/create_mode"},
+                                "kind": {"type": "string", "enum": ["heartbeat"]},
+                                "name": {"type": "string"}
+                            },
+                            "additionalProperties": false
+                        },
+                        "create_mode": {
+                            "type": "string",
+                            "enum": ["create", "suggested_create"]
+                        },
+                        "update_group": {
+                            "anyOf": [
+                                {"$ref": "#/$defs/update_cron"},
+                                {"$ref": "#/$defs/update_heartbeat"}
+                            ]
+                        },
+                        "update_cron": {
+                            "type": "object",
+                            "required": ["mode", "kind", "name", "id"],
+                            "properties": {
+                                "mode": {"$ref": "#/$defs/update_mode"},
+                                "kind": {"type": "string", "enum": ["cron"]},
+                                "name": {"type": "string"},
+                                "id": {"type": "string"}
+                            },
+                            "additionalProperties": false
+                        },
+                        "update_heartbeat": {
+                            "type": "object",
+                            "required": ["mode", "kind", "name", "id"],
+                            "properties": {
+                                "mode": {"$ref": "#/$defs/update_mode"},
+                                "kind": {"type": "string", "enum": ["heartbeat"]},
+                                "name": {"type": "string"},
+                                "id": {"type": "string"}
+                            },
+                            "additionalProperties": false
+                        },
+                        "update_mode": {
+                            "type": "string",
+                            "enum": ["update", "suggested_update"]
+                        },
+                        "delete": {
+                            "type": "object",
+                            "required": ["mode", "id"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "mode": {"type": "string", "enum": ["delete"]}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "oneOf": [
+                        {"$ref": "#/$defs/view"},
+                        {"$ref": "#/$defs/create_group"},
+                        {"$ref": "#/$defs/update_group"},
+                        {"$ref": "#/$defs/delete"}
+                    ],
+                    "properties": {}
                 }
-            ])
-        );
+            }],
+            "input": "hi"
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let function = &result["tools"][0]["function"];
+        let parameters = &function["parameters"];
+
+        assert_eq!(parameters["type"], "object");
+        assert!(parameters.get("oneOf").is_none());
+        assert!(parameters.get("anyOf").is_none());
+        assert_eq!(parameters["required"], json!(["mode"]));
+        assert_eq!(parameters["additionalProperties"], false);
+        assert!(parameters["properties"].get("id").is_some());
+        assert!(parameters["properties"].get("name").is_some());
+        assert!(parameters["properties"].get("kind").is_some());
+        assert_eq!(parameters["properties"]["mode"]["anyOf"].as_array().unwrap().len(), 4);
+        assert!(parameters["$defs"].get("create_group").is_none());
+        assert!(parameters["$defs"].get("create_mode").is_some());
+        assert_eq!(function["strict"], false);
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_unmergeable_root_union_unchanged() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "tools": [{
+                "type": "function",
+                "name": "unsafe_union",
+                "strict": true,
+                "parameters": {
+                    "oneOf": [
+                        {"type": "object", "properties": {"id": {"type": "string"}}},
+                        {"type": "string"}
+                    ]
+                }
+            }],
+            "input": "hi"
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let function = &result["tools"][0]["function"];
+
+        assert!(function["parameters"].get("oneOf").is_some());
+        assert_eq!(function["strict"], true);
     }
 
     #[test]
