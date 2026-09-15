@@ -1674,8 +1674,7 @@ fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option
         return Some(chat_tool);
     }
 
-    let (parameters, flattened_root_union) =
-        normalize_function_parameters(tool.get("parameters"));
+    let (parameters, flattened_root_union) = normalize_function_parameters(tool.get("parameters"));
     let mut function = json!({
         "name": chat_name,
         "description": tool.get("description").cloned().unwrap_or(Value::Null),
@@ -2920,7 +2919,13 @@ mod tests {
         assert!(parameters["properties"].get("id").is_some());
         assert!(parameters["properties"].get("name").is_some());
         assert!(parameters["properties"].get("kind").is_some());
-        assert_eq!(parameters["properties"]["mode"]["anyOf"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            parameters["properties"]["mode"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
         assert!(parameters["$defs"].get("create_group").is_none());
         assert!(parameters["$defs"].get("create_mode").is_some());
         assert_eq!(function["strict"], false);
