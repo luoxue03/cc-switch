@@ -316,6 +316,7 @@ pub fn responses_to_chat_completions_with_reasoning(
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
         result["tools"] = json!(tools);
+        flatten_root_object_unions_in_chat_tools(&mut result["tools"]);
     }
 
     if let Some(tool_choice) = body.get("tool_choice") {
@@ -1397,9 +1398,7 @@ fn serialize_tool_definition_for_description(tool: &Value) -> String {
 ///
 /// Some Responses tools carry `parameters: null` or `parameters: {"type": null}`,
 /// but OpenAI Chat Completions strictly requires `{"type": "object", "properties": {...}}`.
-/// Azure additionally rejects root-level unions even when `type: "object"` is present. Flatten
-/// object-only root unions while keeping branch-specific alternatives on their properties.
-fn normalize_function_parameters(params: Option<&Value>) -> (Value, bool) {
+fn normalize_function_parameters(params: Option<&Value>) -> Value {
     let mut params = match params {
         Some(Value::Object(obj)) => Value::Object(obj.clone()),
         _ => json!({"type": "object", "properties": {}}),
@@ -1412,8 +1411,33 @@ fn normalize_function_parameters(params: Option<&Value>) -> (Value, bool) {
             }
         }
     }
-    let flattened_root_union = flatten_root_object_union(&mut params);
-    (params, flattened_root_union)
+    params
+}
+
+/// Azure rejects root-level unions in Chat tool schemas. Apply this only to the final Chat request
+/// so protocol-neutral tool context consumers, including Anthropic, retain the original schema.
+fn flatten_root_object_unions_in_chat_tools(tools: &mut Value) -> usize {
+    let Some(tools) = tools.as_array_mut() else {
+        return 0;
+    };
+
+    let mut flattened_count = 0;
+    for tool in tools {
+        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let flattened = function
+            .get_mut("parameters")
+            .is_some_and(flatten_root_object_union);
+        if !flattened {
+            continue;
+        }
+        flattened_count += 1;
+        if function.get("strict") == Some(&Value::Bool(true)) {
+            function.insert("strict".to_string(), Value::Bool(false));
+        }
+    }
+    flattened_count
 }
 
 fn flatten_root_object_union(schema: &mut Value) -> bool {
@@ -1659,22 +1683,18 @@ fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option
             .and_then(|value| value.as_object_mut())
         {
             // Ensure parameters.type is "object" for strict OpenAI-compatible providers
-            let (parameters, flattened_root_union) =
-                normalize_function_parameters(obj.get("parameters"));
+            let parameters = normalize_function_parameters(obj.get("parameters"));
             obj.insert("parameters".to_string(), parameters);
 
             obj.insert("name".to_string(), json!(chat_name));
             if let Some(strict) = tool.get("strict").cloned() {
                 obj.entry("strict".to_string()).or_insert(strict);
             }
-            if flattened_root_union && obj.get("strict") == Some(&Value::Bool(true)) {
-                obj.insert("strict".to_string(), Value::Bool(false));
-            }
         }
         return Some(chat_tool);
     }
 
-    let (parameters, flattened_root_union) = normalize_function_parameters(tool.get("parameters"));
+    let parameters = normalize_function_parameters(tool.get("parameters"));
     let mut function = json!({
         "name": chat_name,
         "description": tool.get("description").cloned().unwrap_or(Value::Null),
@@ -1683,10 +1703,6 @@ fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option
     if let Some(strict) = tool.get("strict") {
         function["strict"] = strict.clone();
     }
-    if flattened_root_union && function.get("strict") == Some(&Value::Bool(true)) {
-        function["strict"] = Value::Bool(false);
-    }
-
     Some(json!({
         "type": "function",
         "function": function
