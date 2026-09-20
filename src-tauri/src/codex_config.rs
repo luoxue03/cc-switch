@@ -1642,10 +1642,7 @@ fn apply_codex_multi_agent_metadata(
         && canonical.contains(&"xhigh"))
     .then_some("xhigh");
     if let Some(effort) = explicit_effort.or(inferred_effort) {
-        entry_obj.insert(
-            "multi_agent_reasoning_effort".to_string(),
-            json!(effort),
-        );
+        entry_obj.insert("multi_agent_reasoning_effort".to_string(), json!(effort));
     }
 }
 
@@ -2863,10 +2860,7 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             .map(str::trim)
             .filter(|version| matches!(*version, "disabled" | "v1" | "v2"))
         {
-            obj.insert(
-                "multiAgentVersion".to_string(),
-                json!(multi_agent_version),
-            );
+            obj.insert("multiAgentVersion".to_string(), json!(multi_agent_version));
         }
         if let Some(multi_agent_reasoning_effort) = entry
             .get("multiAgentReasoningEffort")
@@ -7294,10 +7288,7 @@ base_url = "https://production.api/v1"
         // the official xhigh worker effort; explicit custom worker effort is
         // preserved while Ultra still forces V2.
         assert_eq!(models[5]["multi_agent_version"], json!("v2"));
-        assert_eq!(
-            models[5]["multi_agent_reasoning_effort"],
-            json!("xhigh")
-        );
+        assert_eq!(models[5]["multi_agent_reasoning_effort"], json!("xhigh"));
         assert_eq!(models[5]["default_reasoning_level"], json!("ultra"));
         assert_eq!(models[6]["multi_agent_version"], json!("v2"));
         assert_eq!(models[6]["multi_agent_reasoning_effort"], json!("max"));
