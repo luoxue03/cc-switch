@@ -106,6 +106,39 @@ describe("ProviderForm Codex catalog helpers", () => {
     ]);
   });
 
+  it("enables Multi-Agent V2 for Ultra and matches the official Astra worker effort", () => {
+    expect(
+      normalizeCodexCatalogModelsForSave([
+        {
+          model: " GPT-6-Astra ",
+          reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          defaultReasoningLevel: "ultra",
+        },
+        {
+          model: "custom-ultra",
+          reasoningLevels: ["high", "max", "ultra"],
+          multiAgentReasoningEffort: "max",
+        },
+      ]),
+    ).toEqual([
+      {
+        model: "GPT-6-Astra",
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultReasoningLevel: "ultra",
+        multiAgentVersion: "v2",
+        multiAgentReasoningEffort: "xhigh",
+        routeMode: "responses",
+      },
+      {
+        model: "custom-ultra",
+        reasoningLevels: ["high", "max", "ultra"],
+        multiAgentVersion: "v2",
+        multiAgentReasoningEffort: "max",
+        routeMode: "responses",
+      },
+    ]);
+  });
+
   it("round-trips reasoning levels through load and save without loss", () => {
     // load→save 回环：加载映射（mapCodexCatalogModelForForm）与保存归一化
     // （normalizeCodexCatalogModelsForSave）各锁半边时，回环丢字段两边都测不出——
@@ -118,6 +151,12 @@ describe("ProviderForm Codex catalog helpers", () => {
       },
       // 手写/旧数据可能是 snake_case，加载侧兼容后保存侧同样要留住
       { model: "deepseek-v4-flash", reasoning_levels: ["low", "high", "max"] },
+      {
+        model: "GPT-6-Astra",
+        reasoning_levels: ["xhigh", "max", "ultra"],
+        multi_agent_version: "v2",
+        multi_agent_reasoning_effort: "xhigh",
+      },
       { model: "glm-5.1" }, // toggle 型：无表，全程不得凭空造表
     ];
 
@@ -135,6 +174,13 @@ describe("ProviderForm Codex catalog helpers", () => {
       {
         model: "deepseek-v4-flash",
         reasoningLevels: ["low", "high", "max"],
+        routeMode: "responses",
+      },
+      {
+        model: "GPT-6-Astra",
+        reasoningLevels: ["xhigh", "max", "ultra"],
+        multiAgentVersion: "v2",
+        multiAgentReasoningEffort: "xhigh",
         routeMode: "responses",
       },
       { model: "glm-5.1", routeMode: "responses" },

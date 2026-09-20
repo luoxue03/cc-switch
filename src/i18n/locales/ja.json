@@ -1583,6 +1583,8 @@
     "reasoningLevelsEmpty": "レベルなし",
     "defaultReasoningLevelLabel": "デフォルトレベル",
     "defaultReasoningLevelPlaceholder": "自動",
+    "multiAgentReasoningEffortLabel": "Ultra Agent 強度",
+    "multiAgentReasoningEffortPlaceholder": "自動",
     "catalogColumnSort": "並び順",
     "catalogColumnRouteMode": "ルートモード",
     "dragCatalogModel": "ドラッグして並び替え",

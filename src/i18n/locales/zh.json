@@ -1583,6 +1583,8 @@
     "reasoningLevelsEmpty": "无等级",
     "defaultReasoningLevelLabel": "默认等级",
     "defaultReasoningLevelPlaceholder": "自动",
+    "multiAgentReasoningEffortLabel": "Ultra Agent 强度",
+    "multiAgentReasoningEffortPlaceholder": "自动",
     "catalogColumnSort": "排序",
     "catalogColumnRouteMode": "路由模式",
     "dragCatalogModel": "拖拽排序",

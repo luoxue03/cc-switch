@@ -203,6 +203,30 @@ export const normalizeCodexCatalogModelsForSave = (
       ?.filter((level) => typeof level === "string" && level.trim())
       .map((level) => level.trim());
     const defaultReasoningLevel = item.defaultReasoningLevel?.trim();
+    const hasUltra = reasoningLevels?.includes("ultra") === true;
+    const multiAgentVersion = hasUltra
+      ? "v2"
+      : item.multiAgentVersion === "disabled" ||
+          item.multiAgentVersion === "v1" ||
+          item.multiAgentVersion === "v2"
+        ? item.multiAgentVersion
+        : undefined;
+    const explicitMultiAgentEffort = item.multiAgentReasoningEffort?.trim();
+    const validExplicitMultiAgentEffort =
+      explicitMultiAgentEffort &&
+      ["minimal", "low", "medium", "high", "xhigh", "max"].includes(
+        explicitMultiAgentEffort,
+      ) &&
+      (!reasoningLevels || reasoningLevels.includes(explicitMultiAgentEffort))
+        ? explicitMultiAgentEffort
+        : undefined;
+    const multiAgentReasoningEffort = validExplicitMultiAgentEffort
+      ? validExplicitMultiAgentEffort
+      : hasUltra &&
+          model.toLowerCase() === "gpt-6-astra" &&
+          reasoningLevels?.includes("xhigh")
+        ? "xhigh"
+        : undefined;
 
     normalized.push({
       model,
@@ -220,6 +244,8 @@ export const normalizeCodexCatalogModelsForSave = (
         ? { reasoningLevels }
         : {}),
       ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
+      ...(multiAgentVersion ? { multiAgentVersion } : {}),
+      ...(multiAgentReasoningEffort ? { multiAgentReasoningEffort } : {}),
       ...(routeMode ? { routeMode } : {}),
     });
   }

@@ -32,7 +32,7 @@ function pickCodexApiKey(
 // 目录行 load 映射（隐藏字段白名单重建）。抽成可导出的纯函数，与
 // normalizeCodexCatalogModelsForSave 成对做 load→save 回环测试——
 // 任一侧丢字段都会静默清空供应商的逐模型声明（reasoningLevels、
-// baseInstructions 等），且 UI 无可察觉。
+// Multi-Agent 元数据、baseInstructions 等），且 UI 无可察觉。
 export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
   // 隐藏字段（原生 Responses profile 用）不在行 UI 暴露，但必须 load→save
   // 原样保留，否则编辑保存 MiMo/MiniMax 等会丢官方 base_instructions、
@@ -65,6 +65,22 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
       ? item.defaultReasoningLevel
       : typeof item?.default_reasoning_level === "string"
         ? item.default_reasoning_level
+        : undefined;
+  const multiAgentVersion =
+    item?.multiAgentVersion === "disabled" ||
+    item?.multiAgentVersion === "v1" ||
+    item?.multiAgentVersion === "v2"
+      ? item.multiAgentVersion
+      : item?.multi_agent_version === "disabled" ||
+          item?.multi_agent_version === "v1" ||
+          item?.multi_agent_version === "v2"
+        ? item.multi_agent_version
+        : undefined;
+  const multiAgentReasoningEffort =
+    typeof item?.multiAgentReasoningEffort === "string"
+      ? item.multiAgentReasoningEffort
+      : typeof item?.multi_agent_reasoning_effort === "string"
+        ? item.multi_agent_reasoning_effort
         : undefined;
   const routeMode =
     item?.routeMode === "chat" ||
@@ -101,6 +117,8 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
       ? { reasoningLevels }
       : {}),
     ...(defaultReasoningLevel ? { defaultReasoningLevel } : {}),
+    ...(multiAgentVersion ? { multiAgentVersion } : {}),
+    ...(multiAgentReasoningEffort ? { multiAgentReasoningEffort } : {}),
     ...(routeMode ? { routeMode } : {}),
   };
 };

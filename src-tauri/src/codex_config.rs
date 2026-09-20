@@ -1601,6 +1601,54 @@ fn apply_codex_routed_reasoning_default(
     entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
 }
 
+fn apply_codex_multi_agent_metadata(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    spec: &CodexCatalogModelSpec,
+) {
+    let canonical = spec
+        .reasoning_levels
+        .as_deref()
+        .map(codex_canonical_efforts)
+        .unwrap_or_default();
+    let has_ultra = canonical.contains(&"ultra");
+    let version = if has_ultra {
+        Some("v2")
+    } else {
+        spec.multi_agent_version.as_deref()
+    };
+
+    let Some(version) = version else {
+        return;
+    };
+    entry_obj.insert("multi_agent_version".to_string(), json!(version));
+
+    if version == "disabled" {
+        entry_obj.remove("multi_agent_reasoning_effort");
+        return;
+    }
+
+    let explicit_effort = spec
+        .multi_agent_reasoning_effort
+        .as_deref()
+        .filter(|effort| !matches!(*effort, "none" | "ultra"))
+        .filter(|effort| {
+            canonical.is_empty() || canonical.iter().any(|candidate| candidate == effort)
+        });
+    // Match the official GPT-6 Astra catalog when an older CC Switch row only
+    // declared Ultra. Other custom models keep Codex's own fallback policy.
+    let inferred_effort = (explicit_effort.is_none()
+        && has_ultra
+        && spec.model.eq_ignore_ascii_case("gpt-6-astra")
+        && canonical.contains(&"xhigh"))
+    .then_some("xhigh");
+    if let Some(effort) = explicit_effort.or(inferred_effort) {
+        entry_obj.insert(
+            "multi_agent_reasoning_effort".to_string(),
+            json!(effort),
+        );
+    }
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -1681,6 +1729,7 @@ fn codex_catalog_model_entry(
     if !apply_codex_reasoning_level_override(entry_obj, template_default, spec) {
         apply_codex_routed_reasoning_default(entry_obj, profile, spec);
     }
+    apply_codex_multi_agent_metadata(entry_obj, spec);
 
     entry
 }
@@ -1721,6 +1770,11 @@ struct CodexCatalogModelSpec {
     /// template default is kept if it is still in the list, otherwise the last
     /// (highest) declared level wins.
     default_reasoning_level: Option<String>,
+    /// Multi-agent runtime selected when this model is active. Selecting Ultra
+    /// forces V2 because proactive delegation is a V2-only Codex behavior.
+    multi_agent_version: Option<String>,
+    /// Ordinary Responses reasoning effort used by workers spawned in Ultra.
+    multi_agent_reasoning_effort: Option<String>,
 }
 
 fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
@@ -1814,6 +1868,23 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
             .map(str::trim)
             .filter(|level| !level.is_empty())
             .map(str::to_string);
+        let multi_agent_version = model_config
+            .get("multiAgentVersion")
+            .or_else(|| model_config.get("multi_agent_version"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|version| matches!(*version, "disabled" | "v1" | "v2"))
+            .map(str::to_string);
+        let multi_agent_reasoning_effort = model_config
+            .get("multiAgentReasoningEffort")
+            .or_else(|| model_config.get("multi_agent_reasoning_effort"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|effort| {
+                codex_reasoning_level_description(effort).is_some()
+                    && !matches!(*effort, "none" | "ultra")
+            })
+            .map(str::to_string);
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
@@ -1825,6 +1896,8 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
             base_instructions,
             reasoning_levels,
             default_reasoning_level,
+            multi_agent_version,
+            multi_agent_reasoning_effort,
         });
     }
 
@@ -2781,6 +2854,30 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             obj.insert(
                 "defaultReasoningLevel".to_string(),
                 json!(default_reasoning_level),
+            );
+        }
+        if let Some(multi_agent_version) = entry
+            .get("multiAgentVersion")
+            .or_else(|| entry.get("multi_agent_version"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|version| matches!(*version, "disabled" | "v1" | "v2"))
+        {
+            obj.insert(
+                "multiAgentVersion".to_string(),
+                json!(multi_agent_version),
+            );
+        }
+        if let Some(multi_agent_reasoning_effort) = entry
+            .get("multiAgentReasoningEffort")
+            .or_else(|| entry.get("multi_agent_reasoning_effort"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+        {
+            obj.insert(
+                "multiAgentReasoningEffort".to_string(),
+                json!(multi_agent_reasoning_effort),
             );
         }
         if let Some(route_mode) = entry
@@ -6946,6 +7043,8 @@ base_url = "https://production.api/v1"
             base_instructions: None,
             reasoning_levels: None,
             default_reasoning_level: None,
+            multi_agent_version: None,
+            multi_agent_reasoning_effort: None,
         }];
         let catalog = codex_model_catalog_from_specs(
             &specs,
@@ -7104,6 +7203,17 @@ base_url = "https://production.api/v1"
                         "model": "unordered-model",
                         "reasoningLevels": ["xhigh", "low", "bogus", "low"],
                         "defaultReasoningLevel": "bogus"
+                    },
+                    {
+                        "model": "GPT-6-Astra",
+                        "reasoningLevels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                        "defaultReasoningLevel": "ultra"
+                    },
+                    {
+                        "model": "custom-ultra",
+                        "reasoningLevels": ["high", "max", "ultra"],
+                        "multiAgentVersion": "v1",
+                        "multiAgentReasoningEffort": "max"
                     }
                 ]
             }
@@ -7179,6 +7289,18 @@ base_url = "https://production.api/v1"
                 .and_then(|v| v.as_str()),
             Some("xhigh")
         );
+
+        // Ultra is proactive only in V2. Existing Astra rows are upgraded to
+        // the official xhigh worker effort; explicit custom worker effort is
+        // preserved while Ultra still forces V2.
+        assert_eq!(models[5]["multi_agent_version"], json!("v2"));
+        assert_eq!(
+            models[5]["multi_agent_reasoning_effort"],
+            json!("xhigh")
+        );
+        assert_eq!(models[5]["default_reasoning_level"], json!("ultra"));
+        assert_eq!(models[6]["multi_agent_version"], json!("v2"));
+        assert_eq!(models[6]["multi_agent_reasoning_effort"], json!("max"));
     }
 
     #[test]
@@ -7488,6 +7610,8 @@ base_url = "https://production.api/v1"
                 base_instructions: None,
                 reasoning_levels: None,
                 default_reasoning_level: None,
+                multi_agent_version: None,
+                multi_agent_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "qwen/qwen3-coder-plus".to_string(),
@@ -7499,6 +7623,8 @@ base_url = "https://production.api/v1"
                 base_instructions: None,
                 reasoning_levels: None,
                 default_reasoning_level: None,
+                multi_agent_version: None,
+                multi_agent_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "glm-5.2v".to_string(),
@@ -7510,6 +7636,8 @@ base_url = "https://production.api/v1"
                 base_instructions: None,
                 reasoning_levels: None,
                 default_reasoning_level: None,
+                multi_agent_version: None,
+                multi_agent_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "deepseek-v4-flash".to_string(),
@@ -7521,6 +7649,8 @@ base_url = "https://production.api/v1"
                 base_instructions: None,
                 reasoning_levels: None,
                 default_reasoning_level: None,
+                multi_agent_version: None,
+                multi_agent_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "custom-text-alias".to_string(),
@@ -7532,6 +7662,8 @@ base_url = "https://production.api/v1"
                 base_instructions: None,
                 reasoning_levels: None,
                 default_reasoning_level: None,
+                multi_agent_version: None,
+                multi_agent_reasoning_effort: None,
             },
         ];
 
@@ -7846,6 +7978,8 @@ wire_api = "responses"
             base_instructions: None,
             reasoning_levels: None,
             default_reasoning_level: None,
+            multi_agent_version: None,
+            multi_agent_reasoning_effort: None,
         }];
         // Using a gpt-5.5-shaped template under ProxyChat must NOT strip
         // apply_patch_tool_type. (The native template lacks it, so synthesize
@@ -8304,7 +8438,9 @@ web_search = "disabled"
                 "routeMode": "chat",
                 "inputModalities": ["text"],
                 "reasoningLevels": ["low", "high", "max"],
-                "defaultReasoningLevel": "high"
+                "defaultReasoningLevel": "high",
+                "multiAgentVersion": "v2",
+                "multiAgentReasoningEffort": "high"
             }]
         }"#;
 
@@ -8335,6 +8471,16 @@ web_search = "disabled"
             entry.get("defaultReasoningLevel").and_then(|v| v.as_str()),
             Some("high")
         );
+        assert_eq!(
+            entry.get("multiAgentVersion").and_then(|v| v.as_str()),
+            Some("v2")
+        );
+        assert_eq!(
+            entry
+                .get("multiAgentReasoningEffort")
+                .and_then(|v| v.as_str()),
+            Some("high")
+        );
     }
 
     #[test]
@@ -8346,7 +8492,9 @@ web_search = "disabled"
                     {"effort": "low", "description": "Low"},
                     {"effort": "high", "description": "High"}
                 ],
-                "default_reasoning_level": "high"
+                "default_reasoning_level": "high",
+                "multi_agent_version": "v2",
+                "multi_agent_reasoning_effort": "high"
             }]
         }"#;
 
@@ -8356,6 +8504,16 @@ web_search = "disabled"
         assert_eq!(entry.get("reasoningLevels"), Some(&json!(["low", "high"])));
         assert_eq!(
             entry.get("defaultReasoningLevel").and_then(|v| v.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            entry.get("multiAgentVersion").and_then(|v| v.as_str()),
+            Some("v2")
+        );
+        assert_eq!(
+            entry
+                .get("multiAgentReasoningEffort")
+                .and_then(|v| v.as_str()),
             Some("high")
         );
     }

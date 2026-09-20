@@ -282,6 +282,10 @@ export interface CodexCatalogModel {
   // reasoningLevels; when omitted the backend keeps the template default if it
   // is still in the list, otherwise the highest declared level.
   defaultReasoningLevel?: string;
+  // Codex orchestration metadata. Ultra becomes proactive only with V2; the
+  // worker effort is the ordinary Responses reasoning level used by agents.
+  multiAgentVersion?: "disabled" | "v1" | "v2";
+  multiAgentReasoningEffort?: string;
   routeMode?: "chat" | "responses" | "anthropic";
 }
 

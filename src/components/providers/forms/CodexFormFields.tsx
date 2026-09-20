@@ -220,6 +220,12 @@ function createCatalogRow(
     ...(seed?.defaultReasoningLevel
       ? { defaultReasoningLevel: seed.defaultReasoningLevel }
       : {}),
+    ...(seed?.multiAgentVersion
+      ? { multiAgentVersion: seed.multiAgentVersion }
+      : {}),
+    ...(seed?.multiAgentReasoningEffort
+      ? { multiAgentReasoningEffort: seed.multiAgentReasoningEffort }
+      : {}),
     routeMode: normalizeRouteMode(seed?.routeMode, fallbackRouteMode),
   };
 }
@@ -250,6 +256,9 @@ function catalogRowsMatchModels(
         JSON.stringify(incoming.reasoningLevels ?? []) &&
       (row.defaultReasoningLevel ?? "") ===
         (incoming.defaultReasoningLevel ?? "") &&
+      (row.multiAgentVersion ?? "") === (incoming.multiAgentVersion ?? "") &&
+      (row.multiAgentReasoningEffort ?? "") ===
+        (incoming.multiAgentReasoningEffort ?? "") &&
       normalizeRouteMode(row.routeMode, fallbackRouteMode) ===
         normalizeRouteMode(incoming.routeMode, fallbackRouteMode)
     );
@@ -290,17 +299,23 @@ const AUTO_DEFAULT_REASONING_LEVEL = "__auto__";
 function ReasoningLevelsEditor({
   levels,
   defaultLevel,
+  model,
+  multiAgentReasoningEffort,
   inheritedLevels,
   inheritedDefaultLevel,
   onLevelsChange,
   onDefaultLevelChange,
+  onMultiAgentReasoningEffortChange,
 }: {
   levels?: string[];
   defaultLevel?: string;
+  model: string;
+  multiAgentReasoningEffort?: string;
   inheritedLevels?: string[];
   inheritedDefaultLevel?: string;
   onLevelsChange: (levels: string[] | undefined) => void;
   onDefaultLevelChange: (level: string | undefined) => void;
+  onMultiAgentReasoningEffortChange: (level: string | undefined) => void;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -313,6 +328,19 @@ function ReasoningLevelsEditor({
       : inheritedDefaultLevel && selected.includes(inheritedDefaultLevel)
         ? inheritedDefaultLevel
         : undefined;
+  const multiAgentEffortOptions = selected.filter(
+    (level) => level !== "none" && level !== "ultra",
+  );
+  const inferredMultiAgentEffort =
+    model.trim().toLowerCase() === "gpt-6-astra" &&
+    multiAgentEffortOptions.includes("xhigh")
+      ? "xhigh"
+      : undefined;
+  const effectiveMultiAgentEffort =
+    multiAgentReasoningEffort &&
+    multiAgentEffortOptions.includes(multiAgentReasoningEffort)
+      ? multiAgentReasoningEffort
+      : inferredMultiAgentEffort;
 
   const toggleLevel = (level: string) => {
     const picked = selected.includes(level)
@@ -326,6 +354,12 @@ function ReasoningLevelsEditor({
     onLevelsChange(next.length > 0 ? next : undefined);
     if (defaultLevel && !next.includes(defaultLevel)) {
       onDefaultLevelChange(undefined);
+    }
+    if (
+      !next.includes("ultra") ||
+      (multiAgentReasoningEffort && !next.includes(multiAgentReasoningEffort))
+    ) {
+      onMultiAgentReasoningEffortChange(undefined);
     }
   };
 
@@ -437,6 +471,49 @@ function ReasoningLevelsEditor({
                 ))}
               </SelectContent>
             </Select>
+            {selected.includes("ultra") &&
+              multiAgentEffortOptions.length > 0 && (
+                <>
+                  <span className="mt-2 block text-xs text-muted-foreground">
+                    {t("codexConfig.multiAgentReasoningEffortLabel", {
+                      defaultValue: "Ultra agent effort",
+                    })}
+                  </span>
+                  <Select
+                    value={
+                      effectiveMultiAgentEffort ?? AUTO_DEFAULT_REASONING_LEVEL
+                    }
+                    onValueChange={(value) =>
+                      onMultiAgentReasoningEffortChange(
+                        value === AUTO_DEFAULT_REASONING_LEVEL
+                          ? undefined
+                          : value,
+                      )
+                    }
+                  >
+                    <SelectTrigger className="mt-1 h-8 w-full">
+                      <SelectValue
+                        placeholder={t(
+                          "codexConfig.multiAgentReasoningEffortPlaceholder",
+                          { defaultValue: "Auto" },
+                        )}
+                      />
+                    </SelectTrigger>
+                    <SelectContent className="z-[1100]">
+                      <SelectItem value={AUTO_DEFAULT_REASONING_LEVEL}>
+                        {t("codexConfig.multiAgentReasoningEffortPlaceholder", {
+                          defaultValue: "Auto",
+                        })}
+                      </SelectItem>
+                      {multiAgentEffortOptions.map((level) => (
+                        <SelectItem key={level} value={level}>
+                          {level}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </>
+              )}
           </div>
         )}
       </PopoverContent>
@@ -565,13 +642,28 @@ function SortableCatalogRow({
       <ReasoningLevelsEditor
         levels={row.reasoningLevels}
         defaultLevel={row.defaultReasoningLevel}
+        model={row.model}
+        multiAgentReasoningEffort={row.multiAgentReasoningEffort}
         inheritedLevels={reasoningDefaults.levels}
         inheritedDefaultLevel={reasoningDefaults.defaultLevel}
         onLevelsChange={(levels) =>
-          onUpdate(index, { reasoningLevels: levels })
+          onUpdate(index, {
+            reasoningLevels: levels,
+            ...(levels?.includes("ultra")
+              ? { multiAgentVersion: "v2" as const }
+              : {}),
+          })
         }
         onDefaultLevelChange={(level) =>
           onUpdate(index, { defaultReasoningLevel: level })
+        }
+        onMultiAgentReasoningEffortChange={(level) =>
+          onUpdate(index, {
+            multiAgentVersion: row.reasoningLevels?.includes("ultra")
+              ? "v2"
+              : row.multiAgentVersion,
+            multiAgentReasoningEffort: level,
+          })
         }
       />
       <Select

@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { PropsWithChildren } from "react";
 import { useForm } from "react-hook-form";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexFormFields } from "@/components/providers/forms/CodexFormFields";
 import { Form } from "@/components/ui/form";
 import { providersApi } from "@/lib/api/providers";
@@ -82,6 +82,31 @@ function renderCodexFormFields({
 }
 
 describe("CodexFormFields catalog ordering", () => {
+  let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollIntoView",
+    );
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+  });
+
+  afterEach(() => {
+    if (scrollIntoViewDescriptor) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "scrollIntoView",
+        scrollIntoViewDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    }
+  });
+
   it("renders drag sorting and concrete route modes without a default option", () => {
     renderCodexFormFields();
 
@@ -107,6 +132,29 @@ describe("CodexFormFields catalog ordering", () => {
     for (const editor of editors) {
       expect(editor).toHaveTextContent("low, medium, high, xhigh");
     }
+  });
+
+  it("enables Multi-Agent V2 immediately when Ultra is selected", async () => {
+    const user = userEvent.setup();
+    const onCatalogModelsChange = vi.fn();
+
+    renderCodexFormFields({
+      catalogModels: [{ model: "GPT-6-Astra", routeMode: "responses" }],
+      onCatalogModelsChange,
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "思考等级" }));
+    await user.click(screen.getByText("ultra"));
+
+    await waitFor(() =>
+      expect(onCatalogModelsChange).toHaveBeenLastCalledWith([
+        expect.objectContaining({
+          model: "GPT-6-Astra",
+          reasoningLevels: ["low", "medium", "high", "xhigh", "ultra"],
+          multiAgentVersion: "v2",
+        }),
+      ]),
+    );
   });
 
   it("imports the local catalog while preserving existing per-model routes", async () => {
@@ -179,6 +227,8 @@ describe("CodexFormFields catalog ordering", () => {
           inputModalities: ["text"],
           reasoningLevels: ["low", "high", "max"],
           defaultReasoningLevel: "high",
+          multiAgentVersion: "v2",
+          multiAgentReasoningEffort: "high",
         },
         {
           model: "gpt-5.5",
@@ -207,6 +257,8 @@ describe("CodexFormFields catalog ordering", () => {
           inputModalities: ["text"],
           reasoningLevels: ["low", "high", "max"],
           defaultReasoningLevel: "high",
+          multiAgentVersion: "v2",
+          multiAgentReasoningEffort: "high",
         }),
         expect.objectContaining({
           model: "gpt-5.5",

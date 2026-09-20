@@ -1583,6 +1583,8 @@
     "reasoningLevelsEmpty": "No levels",
     "defaultReasoningLevelLabel": "Default level",
     "defaultReasoningLevelPlaceholder": "Auto",
+    "multiAgentReasoningEffortLabel": "Ultra agent effort",
+    "multiAgentReasoningEffortPlaceholder": "Auto",
     "catalogColumnSort": "Sort",
     "catalogColumnRouteMode": "Route Mode",
     "dragCatalogModel": "Drag to reorder",
