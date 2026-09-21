@@ -18,6 +18,7 @@ jobs:
   release:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-2022
@@ -105,7 +106,23 @@ jobs:
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
-        run: pnpm tauri build --bundles appimage,deb,rpm
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "=== Linux build attempt ${attempt}/${max_attempts} ==="
+            if pnpm tauri build --bundles appimage,deb,rpm; then
+              echo "✅ Linux build succeeded"
+              exit 0
+            fi
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "❌ Linux build failed after ${max_attempts} attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 60))
+          done
 
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'
