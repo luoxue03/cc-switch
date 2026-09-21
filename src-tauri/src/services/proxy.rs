@@ -1194,6 +1194,14 @@ impl ProxyService {
                 // 只看占位符会把半接管/旧端口残留误判为可复用，导致开启接管后
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
+                    // A healthy takeover can outlive an application upgrade. Re-project the
+                    // current Codex provider so newly supported catalog fields are written even
+                    // when the proxy address itself did not change.
+                    if matches!(&app, AppType::Codex) {
+                        let provider = self.require_current_provider_for_app(&app)?;
+                        self.sync_codex_live_from_provider_while_proxy_active(&provider)
+                            .await?;
+                    }
                     self.refresh_active_target_from_current_provider(&app).await;
                     return Ok(());
                 }
@@ -5899,6 +5907,89 @@ wire_api = "responses"
             .expect("disable Codex takeover");
         crate::settings::update_settings(crate::settings::AppSettings::default())
             .expect("reset settings");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn repeated_codex_takeover_refreshes_stale_model_catalog() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        let provider_config = r#"model_provider = "axonhub"
+model = "GPT-6-Astra"
+
+[model_providers.axonhub]
+name = "AxonHub"
+base_url = "https://axonhub.example/v1"
+wire_api = "responses"
+"#;
+        let provider = Provider::with_id(
+            "axonhub".to_string(),
+            "AxonHub".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "axonhub-key" },
+                "config": provider_config,
+                "modelCatalog": {
+                    "models": [{
+                        "model": "GPT-6-Astra",
+                        "reasoningLevels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                        "defaultReasoningLevel": "ultra",
+                        "routeMode": "responses"
+                    }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save AxonHub provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("set DB current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("set local current provider");
+        crate::codex_config::write_codex_live_atomic(
+            &provider.settings_config["auth"],
+            Some(provider_config),
+        )
+        .expect("seed native Codex live config");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        let mut stale_catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(&catalog_path).expect("read generated catalog"),
+        )
+        .expect("parse generated catalog");
+        let stale_model = stale_catalog["models"][0]
+            .as_object_mut()
+            .expect("catalog model object");
+        stale_model.remove("multi_agent_version");
+        stale_model.remove("multi_agent_reasoning_effort");
+        crate::config::write_json_file(&catalog_path, &stale_catalog)
+            .expect("seed stale pre-upgrade catalog");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("restore already-enabled Codex takeover");
+        service.stop().await.expect("stop test proxy");
+
+        let refreshed_catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(&catalog_path).expect("read refreshed catalog"),
+        )
+        .expect("parse refreshed catalog");
+        let refreshed_model = &refreshed_catalog["models"][0];
+        assert_eq!(refreshed_model["multi_agent_version"], json!("v2"));
+        assert_eq!(
+            refreshed_model["multi_agent_reasoning_effort"],
+            json!("xhigh")
+        );
     }
 
     #[tokio::test]
