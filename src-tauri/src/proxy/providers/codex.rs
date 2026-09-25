@@ -250,11 +250,12 @@ fn is_invalid_encrypted_content_error(error: &ProxyError) -> bool {
     let Ok(body) = serde_json::from_str::<JsonValue>(body) else {
         return false;
     };
-    [body.pointer("/error/code"), body.pointer("/code")]
+    let matches_invalid_encrypted_content = [body.pointer("/error/code"), body.pointer("/code")]
         .into_iter()
         .flatten()
         .filter_map(JsonValue::as_str)
-        .any(|code| code.eq_ignore_ascii_case("invalid_encrypted_content"))
+        .any(|code| code.eq_ignore_ascii_case("invalid_encrypted_content"));
+    matches_invalid_encrypted_content
 }
 
 fn is_invalid_codex_responses_tool_history_item(item: &JsonValue) -> bool {
@@ -3084,10 +3085,7 @@ wire_api = "responses"
         assert_eq!(input[1]["id"], "rs_visible");
         assert_eq!(input[2]["call_id"], "call_1");
         assert_eq!(input[3]["call_id"], "call_1");
-        assert_eq!(
-            input[3]["output"]["encrypted_content"],
-            "nested-tool-data"
-        );
+        assert_eq!(input[3]["output"]["encrypted_content"], "nested-tool-data");
         assert_eq!(input[3]["output"]["text"], "keep output");
     }
 }

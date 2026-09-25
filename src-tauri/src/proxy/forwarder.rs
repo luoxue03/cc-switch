@@ -664,10 +664,9 @@ impl RequestForwarder {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
-                                        let should_switch = self
-                                            .current_provider_id_at_start
-                                            .as_str()
-                                            != provider.id.as_str();
+                                        let should_switch =
+                                            self.current_provider_id_at_start.as_str()
+                                                != provider.id.as_str();
                                         if should_switch {
                                             status.failover_count += 1;
                                             let fm = self.failover_manager.clone();
