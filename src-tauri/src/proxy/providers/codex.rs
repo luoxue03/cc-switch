@@ -140,6 +140,13 @@ fn is_codex_responses_endpoint(endpoint: &str) -> bool {
     )
 }
 
+fn is_codex_responses_generation_endpoint(endpoint: &str) -> bool {
+    let path = endpoint
+        .split_once('?')
+        .map_or(endpoint, |(path, _query)| path);
+    matches!(path, "/responses" | "/v1/responses")
+}
+
 pub fn should_convert_codex_responses_to_chat(
     provider: &Provider,
     endpoint: &str,
@@ -177,6 +184,77 @@ pub fn sanitize_codex_responses_passthrough_body(
     input.retain(|item| !is_invalid_codex_responses_tool_history_item(item));
 
     Ok(())
+}
+
+/// Whether a native Responses request can recover from an upstream rejection of
+/// provider-bound encrypted replay state.
+///
+/// Encrypted reasoning and compaction payloads are opaque to CC Switch and can
+/// only be verified by the account/deployment that created them. Some compatible
+/// gateways load-balance a later turn onto a different deployment and return
+/// `invalid_encrypted_content`. Keep the normal request byte-identical; only the
+/// explicit upstream error unlocks a single degraded retry.
+pub fn should_recover_codex_invalid_encrypted_content(
+    provider: &Provider,
+    endpoint: &str,
+    body: &JsonValue,
+    error: &ProxyError,
+) -> bool {
+    if !is_codex_responses_generation_endpoint(endpoint)
+        || should_convert_codex_responses_to_chat(provider, endpoint, body)
+        || should_convert_codex_responses_to_anthropic(provider, endpoint, body)
+        || !is_invalid_encrypted_content_error(error)
+    {
+        return false;
+    }
+
+    body.get("input")
+        .and_then(JsonValue::as_array)
+        .is_some_and(|input| input.iter().any(is_provider_bound_encrypted_replay_item))
+}
+
+/// Remove only top-level replay items whose encrypted payload is bound to an
+/// upstream account/deployment. Visible messages, tool calls, tool outputs, and
+/// encrypted content nested inside tool output bodies are deliberately untouched.
+pub fn strip_codex_provider_bound_encrypted_replay_items(body: &mut JsonValue) -> usize {
+    let Some(input) = body.get_mut("input").and_then(JsonValue::as_array_mut) else {
+        return 0;
+    };
+
+    let before = input.len();
+    input.retain(|item| !is_provider_bound_encrypted_replay_item(item));
+    before.saturating_sub(input.len())
+}
+
+fn is_provider_bound_encrypted_replay_item(item: &JsonValue) -> bool {
+    matches!(
+        item.get("type").and_then(JsonValue::as_str),
+        Some("reasoning") | Some("compaction") | Some("context_compaction")
+    ) && item
+        .get("encrypted_content")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|content| !content.trim().is_empty())
+}
+
+fn is_invalid_encrypted_content_error(error: &ProxyError) -> bool {
+    let ProxyError::UpstreamError { status, body } = error else {
+        return false;
+    };
+    if *status != 400 {
+        return false;
+    }
+
+    let Some(body) = body.as_deref() else {
+        return false;
+    };
+    let Ok(body) = serde_json::from_str::<JsonValue>(body) else {
+        return false;
+    };
+    [body.pointer("/error/code"), body.pointer("/code")]
+        .into_iter()
+        .flatten()
+        .filter_map(JsonValue::as_str)
+        .any(|code| code.eq_ignore_ascii_case("invalid_encrypted_content"))
 }
 
 fn is_invalid_codex_responses_tool_history_item(item: &JsonValue) -> bool {
@@ -2870,5 +2948,146 @@ wire_api = "responses"
             assert!(error.to_string().contains(expected_reason));
             assert!(!error.to_string().contains(&"x".repeat(65)));
         }
+    }
+
+    #[test]
+    fn test_invalid_encrypted_content_recovery_matches_native_responses_error() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.axonhub.example/v1",
+            "apiFormat": "openai_responses"
+        }));
+        let body = json!({
+            "model": "mog-10-a",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_valid",
+                "summary": [],
+                "encrypted_content": "opaque"
+            }]
+        });
+        let error = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                json!({
+                    "error": {
+                        "message": "The encrypted content for item rs_valid could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+                        "code": "invalid_encrypted_content"
+                    }
+                })
+                .to_string(),
+            ),
+        };
+
+        assert!(should_recover_codex_invalid_encrypted_content(
+            &provider,
+            "/responses",
+            &body,
+            &error
+        ));
+    }
+
+    #[test]
+    fn test_invalid_encrypted_content_recovery_ignores_converted_and_unrelated_requests() {
+        let provider = create_provider(json!({
+            "apiFormat": "openai_responses",
+            "modelCatalog": {
+                "models": [{ "model": "deepseek", "routeMode": "chat" }]
+            }
+        }));
+        let body = json!({
+            "model": "deepseek",
+            "input": [{
+                "type": "reasoning",
+                "encrypted_content": "opaque"
+            }]
+        });
+        let encrypted_error_body = json!({
+            "error": {
+                "message": "The encrypted content could not be verified.",
+                "code": "invalid_encrypted_content"
+            }
+        })
+        .to_string();
+        let encrypted_error = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(encrypted_error_body.clone()),
+        };
+        let unprocessable_error = ProxyError::UpstreamError {
+            status: 422,
+            body: Some(encrypted_error_body),
+        };
+        let unrelated_error = ProxyError::UpstreamError {
+            status: 400,
+            body: Some("maximum context length exceeded".to_string()),
+        };
+
+        assert!(!should_recover_codex_invalid_encrypted_content(
+            &provider,
+            "/responses",
+            &body,
+            &encrypted_error
+        ));
+
+        let native_provider = create_provider(json!({ "apiFormat": "openai_responses" }));
+        assert!(!should_recover_codex_invalid_encrypted_content(
+            &native_provider,
+            "/responses",
+            &body,
+            &unrelated_error
+        ));
+        assert!(!should_recover_codex_invalid_encrypted_content(
+            &native_provider,
+            "/chat/completions",
+            &body,
+            &encrypted_error
+        ));
+        assert!(!should_recover_codex_invalid_encrypted_content(
+            &native_provider,
+            "/responses/compact",
+            &body,
+            &encrypted_error
+        ));
+        assert!(!should_recover_codex_invalid_encrypted_content(
+            &native_provider,
+            "/responses",
+            &body,
+            &unprocessable_error
+        ));
+    }
+
+    #[test]
+    fn test_strip_provider_bound_encrypted_replay_items_preserves_visible_history() {
+        let mut body = json!({
+            "model": "mog-10-a",
+            "input": [
+                { "type": "message", "role": "user", "content": "keep message" },
+                { "type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque-1" },
+                { "type": "reasoning", "id": "rs_visible", "summary": [{ "text": "keep summary" }] },
+                { "type": "compaction", "id": "cmp_1", "encrypted_content": "opaque-2" },
+                { "type": "context_compaction", "id": "ctx_1", "encrypted_content": "opaque-3" },
+                { "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read", "arguments": "{}" },
+                {
+                    "type": "function_call_output",
+                    "id": "fco_1",
+                    "call_id": "call_1",
+                    "output": { "encrypted_content": "nested-tool-data", "text": "keep output" }
+                }
+            ]
+        });
+
+        let removed = strip_codex_provider_bound_encrypted_replay_items(&mut body);
+
+        assert_eq!(removed, 3);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["content"], "keep message");
+        assert_eq!(input[1]["id"], "rs_visible");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[3]["call_id"], "call_1");
+        assert_eq!(
+            input[3]["output"]["encrypted_content"],
+            "nested-tool-data"
+        );
+        assert_eq!(input[3]["output"]["text"], "keep output");
     }
 }

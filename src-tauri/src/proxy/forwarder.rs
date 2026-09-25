@@ -456,6 +456,7 @@ impl RequestForwarder {
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
+        let mut encrypted_replay_retry_used = false;
 
         // 单 Provider 场景下跳过熔断器检查（故障转移关闭时）
         let bypass_circuit_breaker = providers.len() == 1;
@@ -598,6 +599,127 @@ impl RequestForwarder {
                         Some(ProviderType::Claude | ProviderType::ClaudeAuth)
                     );
                     let mut signature_rectifier_non_retryable_client_error = false;
+
+                    if matches!(app_type, AppType::Codex)
+                        && !encrypted_replay_retry_used
+                        && super::providers::should_recover_codex_invalid_encrypted_content(
+                            provider,
+                            endpoint,
+                            &provider_body,
+                            &e,
+                        )
+                    {
+                        let mut recovered_body = provider_body.clone();
+                        let removed =
+                            super::providers::strip_codex_provider_bound_encrypted_replay_items(
+                                &mut recovered_body,
+                            );
+
+                        if removed > 0 {
+                            encrypted_replay_retry_used = true;
+                            let model = recovered_body
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            log::warn!(
+                                "[{app_type_str}] [Codex] Upstream rejected provider-bound encrypted replay state; retrying provider={} model={} after dropping {removed} encrypted reasoning/compaction item(s)",
+                                provider.id,
+                                model
+                            );
+
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &recovered_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                )
+                                .await
+                            {
+                                Ok((response, claude_api_format, outbound_model)) => {
+                                    log::info!(
+                                        "[{app_type_str}] [Codex] Encrypted replay recovery retry succeeded"
+                                    );
+                                    self.record_success_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                    )
+                                    .await;
+
+                                    {
+                                        let mut current_providers =
+                                            self.current_providers.write().await;
+                                        current_providers.insert(
+                                            app_type_str.to_string(),
+                                            (provider.id.clone(), provider.name.clone()),
+                                        );
+                                    }
+
+                                    {
+                                        let mut status = self.status.write().await;
+                                        status.success_requests += 1;
+                                        status.last_error = None;
+                                        let should_switch = self
+                                            .current_provider_id_at_start
+                                            .as_str()
+                                            != provider.id.as_str();
+                                        if should_switch {
+                                            status.failover_count += 1;
+                                            let fm = self.failover_manager.clone();
+                                            let ah = self.app_handle.clone();
+                                            let pid = provider.id.clone();
+                                            let pname = provider.name.clone();
+                                            let at = app_type_str.to_string();
+
+                                            tokio::spawn(async move {
+                                                let _ = fm
+                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
+                                                    .await;
+                                            });
+                                        }
+                                        if status.total_requests > 0 {
+                                            status.success_rate = (status.success_requests as f32
+                                                / status.total_requests as f32)
+                                                * 100.0;
+                                        }
+                                    }
+
+                                    return Ok(ForwardResult {
+                                        response,
+                                        provider: provider.clone(),
+                                        claude_api_format,
+                                        outbound_model,
+                                        connection_guard: None,
+                                    });
+                                }
+                                Err(retry_err) => {
+                                    log::warn!(
+                                        "[{app_type_str}] [Codex] Encrypted replay recovery retry still failed: {retry_err}"
+                                    );
+                                    if let Some(err) = self
+                                        .handle_rectifier_retry_failure(
+                                            retry_err,
+                                            provider,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                            "Codex encrypted replay recovery",
+                                            &mut last_error,
+                                            &mut last_provider,
+                                        )
+                                        .await
+                                    {
+                                        return Err(err);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
 
                     if self.media_retry_should_trigger(
                         adapter.name(),

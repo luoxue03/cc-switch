@@ -63,6 +63,8 @@ pub use codex::{
     provider_needs_responses_namespace_flatten, resolve_codex_catalog_tool_profile,
     resolve_codex_chat_reasoning_config, sanitize_codex_responses_passthrough_body,
     should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
+    should_recover_codex_invalid_encrypted_content,
+    strip_codex_provider_bound_encrypted_replay_items,
 };
 pub use gemini::GeminiAdapter;
 
