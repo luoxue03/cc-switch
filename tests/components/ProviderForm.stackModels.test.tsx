@@ -5,11 +5,22 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
-import type { ProviderCategory, ProviderMeta } from "@/types";
+import type {
+  CodexCatalogModel,
+  ProviderCategory,
+  ProviderMeta,
+} from "@/types";
+import {
+  open as openDialog,
+  save as saveDialog,
+} from "@tauri-apps/plugin-dialog";
+import { providersApi } from "@/lib/api/providers";
 import type { AppMode } from "@/types/proxy";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 const settingsState = vi.hoisted(() => ({ enableStackMode: true }));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 // 聚合版式只看应用当前是不是聚合模式（和应用页同一份 get_app_mode 数据）
 vi.mock("@/lib/query/proxy", async (importOriginal) => {
@@ -65,7 +76,7 @@ function renderForm(
   options: {
     meta?: ProviderMeta;
     category?: ProviderCategory;
-    codexCatalog?: Array<{ model: string; displayName?: string }>;
+    codexCatalog?: CodexCatalogModel[];
     modeView?: AppMode;
     onStackLayoutChange?: (stackLayout: boolean) => void;
   } = {},
@@ -262,6 +273,133 @@ describe("ProviderForm Stack layout (Claude Code)", () => {
 describe("ProviderForm Stack layout (Codex)", () => {
   beforeEach(() => {
     settingsState.enableStackMode = true;
+  });
+
+  it("preserves all protocol settings and per-model routes when saving Responses", async () => {
+    const onSubmit = vi.fn();
+    const chatReasoning = {
+      supportsThinking: true,
+      supportsEffort: true,
+      thinkingParam: "thinking" as const,
+      effortParam: "reasoning_effort" as const,
+      effortValueMode: "passthrough" as const,
+      outputFormat: "auto" as const,
+    };
+    renderForm("codex", onSubmit, {
+      meta: {
+        apiFormat: "openai_responses",
+        codexChatReasoning: chatReasoning,
+        promptCacheRouting: "enabled",
+        maxOutputTokens: 65536,
+        apiKeyField: "ANTHROPIC_API_KEY",
+        impersonateClaudeCode: true,
+      },
+      codexCatalog: [
+        { model: "m-chat", routeMode: "chat" },
+        { model: "m-claude", routeMode: "anthropic" },
+      ],
+    });
+    const routes = screen.getAllByRole("combobox", {
+      name: "codexConfig.catalogColumnRouteMode",
+    });
+    expect(routes[0]).toHaveTextContent("Chat");
+    expect(routes[1]).toHaveTextContent("Anthropic");
+    const { values, settings } = await save(onSubmit);
+    expect(values.meta).toMatchObject({
+      apiFormat: "openai_responses",
+      codexChatReasoning: chatReasoning,
+      promptCacheRouting: "enabled",
+      maxOutputTokens: 65536,
+      apiKeyField: "ANTHROPIC_API_KEY",
+      impersonateClaudeCode: true,
+    });
+    expect(settings.modelCatalog.models).toEqual([
+      { model: "m-chat", routeMode: "chat" },
+      { model: "m-claude", routeMode: "anthropic" },
+    ]);
+  });
+
+  it("imports into the draft only, keeping explicit routes and defaulting legacy rows", async () => {
+    const onSubmit = vi.fn();
+    vi.mocked(openDialog).mockResolvedValueOnce("/tmp/models.json");
+    const read = vi
+      .spyOn(providersApi, "readCodexModelCatalogFile")
+      .mockResolvedValueOnce({
+        models: [
+          {
+            model: "old",
+            routeMode: "responses",
+            reasoningLevels: ["high", "ultra"],
+          },
+          { model: "new" },
+        ],
+      });
+    renderForm("codex", onSubmit, {
+      meta: { apiFormat: "anthropic" },
+      codexCatalog: [{ model: "old", routeMode: "chat" }],
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexConfig.importCatalog" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("new")).toBeInTheDocument(),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledWith("/tmp/models.json");
+    const { settings } = await save(onSubmit);
+    expect(settings.modelCatalog.models).toEqual([
+      {
+        model: "old",
+        routeMode: "responses",
+        reasoningLevels: ["high", "ultra"],
+      },
+      { model: "new", routeMode: "anthropic" },
+    ]);
+    read.mockRestore();
+  });
+
+  it("exports explicit route modes without saving the provider or serializing row IDs", async () => {
+    const onSubmit = vi.fn();
+    vi.mocked(saveDialog).mockResolvedValueOnce("/tmp/export.json");
+    const write = vi
+      .spyOn(providersApi, "exportCodexModelMappingFile")
+      .mockResolvedValueOnce();
+    renderForm("codex", onSubmit, {
+      meta: { apiFormat: "openai_chat" },
+      codexCatalog: [
+        { model: "second", routeMode: "responses" },
+        { model: "first" },
+      ],
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexConfig.exportCatalog" }),
+    );
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    const [path, models] = write.mock.calls[0];
+    expect(path).toBe("/tmp/export.json");
+    expect(models.map((row) => [row.model, row.routeMode])).toEqual([
+      ["second", "responses"],
+      ["first", "chat"],
+    ]);
+    expect(models.every((row) => !("rowId" in row))).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+    write.mockRestore();
+  });
+
+  it("leaves the draft unchanged after cancelling import", async () => {
+    vi.mocked(openDialog).mockResolvedValueOnce(null);
+    renderForm("codex", vi.fn(), {
+      codexCatalog: [{ model: "keep", routeMode: "responses" }],
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "codexConfig.importCatalog" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "codexConfig.importCatalog" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.getByDisplayValue("keep")).toBeInTheDocument();
   });
 
   it("简化面板：模型列表在外面，没有默认模型字段和配置编辑器", () => {

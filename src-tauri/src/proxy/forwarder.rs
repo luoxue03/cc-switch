@@ -1403,11 +1403,11 @@ impl RequestForwarder {
         // below must be skipped on the Anthropic path (the marker has to survive to
         // catalog matching and to the transform's own strip+beta detection).
         let mut codex_responses_to_chat = matches!(app_type, AppType::Codex | AppType::GrokBuild)
-            && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
+            && super::providers::should_convert_codex_responses_to_chat(provider, endpoint, body);
         let mut codex_responses_to_anthropic =
             matches!(app_type, AppType::Codex | AppType::GrokBuild)
                 && super::providers::should_convert_codex_responses_to_anthropic(
-                    provider, endpoint,
+                    provider, endpoint, body,
                 );
         let mut copilot_endpoint_override: Option<String> = None;
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
@@ -1966,10 +1966,20 @@ impl RequestForwarder {
             }
         }
 
+        // Preflight only native Responses requests; official auth remains untouched.
+        if matches!(app_type, AppType::Codex)
+            && super::providers::is_codex_responses_endpoint(endpoint)
+            && !codex_responses_to_chat
+            && !codex_responses_to_anthropic
+        {
+            super::providers::codex::sanitize_codex_responses_passthrough_body(
+                &mut request_body,
+                provider,
+            )?;
+        }
+
         // Native Responses passthrough to a strict third-party gateway (xAI).
-        // One gate so rebase conflicts stay here plus the isolate file, not
-        // scattered across sanitizers. Flatten namespaces first; then apply
-        // xAI request rewrites (schema, agent_message, unknown models).
+        // Flatten namespaces first; then apply xAI-specific compatibility rewrites.
         if matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && !codex_responses_to_chat
             && !codex_responses_to_anthropic
@@ -2087,6 +2097,25 @@ impl RequestForwarder {
         // 精确认证材料。实际日志永远不输出这些值。
         let mut log_secrets: Vec<String> = Vec::new();
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
+            if matches!(app_type, AppType::Codex)
+                && !codex_official_auth_passthrough
+                && matches!(
+                    auth.strategy,
+                    AuthStrategy::Bearer | AuthStrategy::Anthropic
+                )
+            {
+                auth.strategy = if codex_responses_to_anthropic
+                    && provider
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.api_key_field.as_deref())
+                        .is_some_and(|field| field.eq_ignore_ascii_case("ANTHROPIC_API_KEY"))
+                {
+                    AuthStrategy::Anthropic
+                } else {
+                    AuthStrategy::Bearer
+                };
+            }
             // GitHub Copilot 特殊处理：从 CopilotAuthManager 获取真实 token
             if auth.strategy == AuthStrategy::GitHubCopilot {
                 if let Some(app_handle) = &self.app_handle {

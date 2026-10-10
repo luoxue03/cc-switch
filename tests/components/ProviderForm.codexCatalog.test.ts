@@ -2,6 +2,21 @@ import { describe, expect, it } from "vitest";
 import { normalizeCodexCatalogModelsForSave } from "@/components/providers/forms/ProviderForm";
 import { mapCodexCatalogModelForForm } from "@/components/providers/forms/hooks/useCodexConfigState";
 
+it("preserves camelCase and legacy snake_case route modes on load and save", () => {
+  const loaded = [
+    { model: "responses", routeMode: "responses" },
+    { model: "chat", route_mode: "openai_chat" },
+    { model: "anthropic", routeMode: "anthropic_messages" },
+    { model: "legacy" },
+  ].map(mapCodexCatalogModelForForm);
+  expect(normalizeCodexCatalogModelsForSave(loaded)).toEqual([
+    { model: "responses", routeMode: "responses" },
+    { model: "chat", routeMode: "chat" },
+    { model: "anthropic", routeMode: "anthropic" },
+    { model: "legacy" },
+  ]);
+});
+
 describe("ProviderForm Codex catalog helpers", () => {
   it("normalizes catalog rows and removes empty or duplicate models", () => {
     expect(

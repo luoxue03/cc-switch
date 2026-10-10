@@ -276,8 +276,11 @@ export type CodexApiFormat = "openai_responses" | "openai_chat" | "anthropic";
 
 export type CodexCopilotApiFormat = "auto" | "openai_responses" | "openai_chat";
 
+export type CodexModelRouteMode = "chat" | "responses" | "anthropic";
+
 export interface CodexCatalogModel {
   model: string;
+  routeMode?: CodexModelRouteMode;
   displayName?: string;
   contextWindow?: string | number;
   // Hidden provider capability metadata for the generated model catalog.

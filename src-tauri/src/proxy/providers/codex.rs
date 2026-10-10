@@ -6,6 +6,7 @@
 //! 支持检测官方 Codex 客户端 (codex_vscode, codex_cli_rs)
 
 use super::{AuthInfo, AuthStrategy, ProviderAdapter};
+use crate::codex_config::CodexCatalogToolProfile;
 use crate::provider::{CodexChatReasoningConfig, Provider};
 use crate::proxy::error::ProxyError;
 use regex::Regex;
@@ -21,6 +22,77 @@ static CODEX_CLIENT_REGEX: LazyLock<Regex> =
 
 /// Codex 适配器
 pub struct CodexAdapter;
+
+const MAX_RESPONSES_ITEM_ID_LEN: usize = 64;
+
+/// Third-party Responses gateways reject Codex-internal metadata and long replay IDs.
+/// Official login requests are intentionally untouched.
+pub(crate) fn sanitize_codex_responses_passthrough_body(
+    body: &mut JsonValue,
+    provider: &Provider,
+) -> Result<(), ProxyError> {
+    if is_codex_official_provider(provider) || provider.is_github_copilot() {
+        return Ok(());
+    }
+    let Some(input) = body.get_mut("input").and_then(JsonValue::as_array_mut) else {
+        return Ok(());
+    };
+    for (index, item) in input.iter_mut().enumerate() {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        object.remove("internal_chat_message_metadata_passthrough");
+        let Some(id) = object.get("id").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let original_len = id.chars().count();
+        if original_len <= MAX_RESPONSES_ITEM_ID_LEN {
+            continue;
+        }
+        let item_type = match object.get("type").and_then(JsonValue::as_str) {
+            Some(
+                kind @ ("message"
+                | "function_call"
+                | "custom_tool_call"
+                | "tool_search_call"
+                | "function_call_output"
+                | "custom_tool_call_output"
+                | "tool_search_output"
+                | "compaction"
+                | "reasoning"
+                | "item_reference"),
+            ) => kind,
+            None if object.contains_key("role") => "message",
+            _ => "unknown",
+        };
+        let removable = matches!(
+            item_type,
+            "message"
+                | "function_call"
+                | "custom_tool_call"
+                | "tool_search_call"
+                | "function_call_output"
+                | "custom_tool_call_output"
+                | "tool_search_output"
+                | "compaction"
+        ) || (item_type == "reasoning"
+            && object
+                .get("encrypted_content")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|value| !value.trim().is_empty()));
+        if !removable {
+            log::warn!("[Codex] Responses ID preflight: input_index={index}, item_type={item_type}, original_len={original_len}, action=reject_unsafe_rewrite");
+            return Err(ProxyError::InvalidRequest(format!(
+                "Codex Responses compatibility check rejected input[{index}] (type={item_type}): id length {original_len} exceeds {MAX_RESPONSES_ITEM_ID_LEN}; a server reference or reasoning without encrypted_content cannot be safely rewritten"
+            )));
+        }
+        log::warn!("[Codex] Responses ID preflight: input_index={index}, item_type={item_type}, original_len={original_len}, action=remove_optional_id");
+        // Keep call_id and opaque encrypted_content byte-identical. Inventing an ID
+        // would make a self-contained replay look like a different server object.
+        object.remove("id");
+    }
+    Ok(())
+}
 
 /// Whether this Codex provider's real upstream should be called through
 /// OpenAI Chat Completions, even if the local Codex client is talking to CC
@@ -84,8 +156,79 @@ pub fn is_codex_responses_endpoint(endpoint: &str) -> bool {
     )
 }
 
-pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &str) -> bool {
-    is_codex_responses_endpoint(endpoint) && codex_provider_uses_chat_completions(provider)
+/// Resolve the per-model route mode for `model` from the provider's model
+/// catalog rows. Accepts both `routeMode` (camelCase, UI/export) and
+/// `route_mode` (snake_case, legacy/import) spellings.
+fn codex_provider_catalog_model_route_mode(
+    provider: &Provider,
+    model: &str,
+) -> Option<CodexCatalogToolProfile> {
+    let models = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(|models| models.as_array())?;
+
+    models.iter().find_map(|entry| {
+        let entry_model = entry.get("model").and_then(|value| value.as_str())?;
+        if entry_model.trim() != model {
+            return None;
+        }
+        entry
+            .get("routeMode")
+            .or_else(|| entry.get("route_mode"))
+            .and_then(|value| value.as_str())
+            .and_then(CodexCatalogToolProfile::from_route_mode)
+    })
+}
+
+/// Resolve the per-model route mode for the request `body`'s `model` field.
+fn codex_request_model_route_mode(
+    provider: &Provider,
+    body: &JsonValue,
+) -> Option<CodexCatalogToolProfile> {
+    if provider.is_github_copilot() || provider.is_xai_oauth() {
+        return None;
+    }
+    let model = body.get("model").and_then(|value| value.as_str())?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    codex_provider_catalog_model_route_mode(provider, model)
+}
+
+pub(crate) fn codex_catalog_needs_routing(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(JsonValue::as_array)
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                matches!(
+                    model
+                        .get("routeMode")
+                        .or_else(|| model.get("route_mode"))
+                        .and_then(JsonValue::as_str)
+                        .and_then(CodexCatalogToolProfile::from_route_mode),
+                    Some(CodexCatalogToolProfile::ProxyChat | CodexCatalogToolProfile::Anthropic)
+                )
+            })
+        })
+}
+
+pub fn should_convert_codex_responses_to_chat(
+    provider: &Provider,
+    endpoint: &str,
+    body: &JsonValue,
+) -> bool {
+    if !is_codex_responses_endpoint(endpoint) || is_codex_official_provider(provider) {
+        return false;
+    }
+    if let Some(route_mode) = codex_request_model_route_mode(provider, body) {
+        return route_mode == CodexCatalogToolProfile::ProxyChat;
+    }
+    codex_provider_uses_chat_completions(provider)
 }
 
 /// Whether a converted Codex Responses request may send `prompt_cache_key` to
@@ -199,15 +342,18 @@ pub fn codex_provider_uses_anthropic(provider: &Provider) -> bool {
         .unwrap_or(false)
 }
 
-pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint: &str) -> bool {
-    let path = endpoint
-        .split_once('?')
-        .map_or(endpoint, |(path, _query)| path);
-
-    matches!(
-        path,
-        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
-    ) && codex_provider_uses_anthropic(provider)
+pub fn should_convert_codex_responses_to_anthropic(
+    provider: &Provider,
+    endpoint: &str,
+    body: &JsonValue,
+) -> bool {
+    if !is_codex_responses_endpoint(endpoint) || is_codex_official_provider(provider) {
+        return false;
+    }
+    if let Some(route_mode) = codex_request_model_route_mode(provider, body) {
+        return route_mode == CodexCatalogToolProfile::Anthropic;
+    }
+    codex_provider_uses_anthropic(provider)
 }
 
 /// Whether a native-Responses Codex upstream needs Codex `namespace`/plugin
@@ -1671,20 +1817,161 @@ wire_api = "anthropic"
         let provider = create_provider(json!({ "apiFormat": "anthropic" }));
         assert!(should_convert_codex_responses_to_anthropic(
             &provider,
-            "/responses"
+            "/responses",
+            &json!({})
         ));
         assert!(should_convert_codex_responses_to_anthropic(
             &provider,
-            "/v1/responses/compact"
+            "/v1/responses/compact",
+            &json!({})
         ));
         assert!(should_convert_codex_responses_to_anthropic(
             &provider,
-            "/responses?x=1"
+            "/responses?x=1",
+            &json!({})
         ));
         assert!(!should_convert_codex_responses_to_anthropic(
             &provider,
-            "/chat/completions"
+            "/chat/completions",
+            &json!({})
         ));
+    }
+
+    #[test]
+    fn per_model_route_modes_override_provider_format_and_keep_endpoint_guard() {
+        for format in ["openai_chat", "openai_responses", "anthropic"] {
+            let provider = create_provider(json!({
+                "apiFormat": format,
+                "modelCatalog": { "models": [
+                    { "model": "deepseek", "routeMode": "chat" },
+                    { "model": "gpt", "route_mode": "responses" },
+                    { "model": "claude[1m]", "routeMode": "anthropic" }
+                ] }
+            }));
+            for (model, chat, anthropic) in [
+                ("deepseek", true, false),
+                ("gpt", false, false),
+                ("claude[1m]", false, true),
+                ("unlisted", format == "openai_chat", format == "anthropic"),
+            ] {
+                let body = json!({ "model": model });
+                for endpoint in ["/responses", "/v1/responses/compact?foo=bar"] {
+                    assert_eq!(
+                        should_convert_codex_responses_to_chat(&provider, endpoint, &body),
+                        chat
+                    );
+                    assert_eq!(
+                        should_convert_codex_responses_to_anthropic(&provider, endpoint, &body),
+                        anthropic
+                    );
+                }
+                assert!(!should_convert_codex_responses_to_chat(
+                    &provider,
+                    "/images/generations",
+                    &body
+                ));
+                assert!(!should_convert_codex_responses_to_anthropic(
+                    &provider,
+                    "/images/generations",
+                    &body
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn route_mode_is_provider_scoped_and_does_not_convert_official_login() {
+        let mut provider = create_provider(json!({
+            "auth": {},
+            "modelCatalog": { "models": [{ "model": "gpt", "routeMode": "anthropic" }] }
+        }));
+        let other = create_provider(json!({ "apiFormat": "openai_responses" }));
+        let body = json!({ "model": "gpt" });
+        assert!(!should_convert_codex_responses_to_anthropic(
+            &other,
+            "/responses",
+            &body
+        ));
+        provider.id = "codex-official".to_string();
+        provider.category = Some("official".to_string());
+        assert!(!should_convert_codex_responses_to_chat(
+            &provider,
+            "/responses",
+            &body
+        ));
+        assert!(!should_convert_codex_responses_to_anthropic(
+            &provider,
+            "/responses",
+            &body
+        ));
+    }
+
+    #[test]
+    fn responses_preflight_preserves_payload_and_pairing_and_leaves_valid_ids_alone() {
+        let provider = create_provider(json!({ "apiFormat": "openai_responses" }));
+        let long_id = "x".repeat(457);
+        let mut body = json!({ "input": [
+            { "type": "message", "id": long_id, "role": "user", "content": "keep", "internal_chat_message_metadata_passthrough": { "turn_id": "dynamic" } },
+            { "type": "function_call", "id": long_id, "call_id": "call_1", "name": "read", "arguments": "{}" },
+            { "type": "function_call_output", "id": long_id, "call_id": "call_1", "output": { "text": "result", "internal_chat_message_metadata_passthrough": "user content" } },
+            { "type": "reasoning", "id": long_id, "encrypted_content": "opaque-unchanged", "summary": [] },
+            { "type": "compaction", "id": long_id, "encrypted_content": "opaque-compaction" },
+            { "type": "reasoning", "id": "rs_valid", "encrypted_content": "valid-opaque" }
+        ] });
+        let before = body.clone();
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
+        for index in 0..5 {
+            assert!(body["input"][index].get("id").is_none());
+        }
+        assert!(body["input"][0]
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+        assert_eq!(body["input"][1]["call_id"], body["input"][2]["call_id"]);
+        assert_eq!(body["input"][2]["output"], before["input"][2]["output"]);
+        assert_eq!(
+            body["input"][3]["encrypted_content"],
+            before["input"][3]["encrypted_content"]
+        );
+        assert_eq!(
+            body["input"][4]["encrypted_content"],
+            before["input"][4]["encrypted_content"]
+        );
+        assert_eq!(body["input"][5], before["input"][5]);
+        let once = body.clone();
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
+        assert_eq!(body, once);
+    }
+
+    #[test]
+    fn responses_preflight_rejects_unresolvable_ids_without_leaking_them() {
+        let provider = create_provider(json!({ "apiFormat": "openai_responses" }));
+        for kind in ["reasoning", "item_reference", "unknown"] {
+            let id = "secret-id".repeat(20);
+            let mut body = json!({ "input": [{ "type": kind, "id": id }] });
+            let error = sanitize_codex_responses_passthrough_body(&mut body, &provider)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("input[0]"));
+            assert!(!error.contains("secret-id"));
+        }
+        for len in [63, 64] {
+            let mut body =
+                json!({ "input": [{ "type": "item_reference", "id": "a".repeat(len) }] });
+            let before = body.clone();
+            sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
+            assert_eq!(body, before);
+        }
+    }
+
+    #[test]
+    fn responses_preflight_does_not_touch_official_login_history() {
+        let mut provider = create_provider(json!({ "auth": {} }));
+        provider.id = "codex-official".to_string();
+        provider.category = Some("official".to_string());
+        let mut body = json!({ "input": [{ "type": "message", "id": "a".repeat(100), "internal_chat_message_metadata_passthrough": { "keep": true } }] });
+        let before = body.clone();
+        sanitize_codex_responses_passthrough_body(&mut body, &provider).unwrap();
+        assert_eq!(body, before);
     }
 
     #[test]
@@ -1982,11 +2269,13 @@ wire_api = "chat"
         assert!(codex_provider_uses_chat_completions(&provider));
         assert!(should_convert_codex_responses_to_chat(
             &provider,
-            "/responses?stream=true"
+            "/responses?stream=true",
+            &json!({})
         ));
         assert!(!should_convert_codex_responses_to_chat(
             &provider,
-            "/chat/completions"
+            "/chat/completions",
+            &json!({})
         ));
     }
 
@@ -1999,7 +2288,8 @@ wire_api = "chat"
         assert!(codex_provider_uses_chat_completions(&provider));
         assert!(should_convert_codex_responses_to_chat(
             &provider,
-            "/v1/responses/compact"
+            "/v1/responses/compact",
+            &json!({})
         ));
     }
 
@@ -2016,7 +2306,8 @@ wire_api = "chat"
         assert!(codex_provider_uses_chat_completions(&provider));
         assert!(should_convert_codex_responses_to_chat(
             &provider,
-            "/responses/compact?stream=true"
+            "/responses/compact?stream=true",
+            &json!({})
         ));
     }
 
@@ -2032,7 +2323,8 @@ wire_api = "chat"
 
         assert!(should_convert_codex_responses_to_chat(
             &provider,
-            "/v1/responses"
+            "/v1/responses",
+            &json!({})
         ));
     }
 

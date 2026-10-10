@@ -865,6 +865,34 @@ pub fn read_live_provider_settings(app: String) -> Result<serde_json::Value, Str
 }
 
 #[tauri::command]
+pub fn read_codex_model_catalog_file(
+    #[allow(non_snake_case)] filePath: String,
+) -> Result<serde_json::Value, String> {
+    let path = std::path::Path::new(&filePath);
+    let text = crate::codex_config::read_codex_model_catalog_text(path)
+        .map_err(|error| error.to_string())?;
+    crate::codex_config::parse_codex_model_catalog_import(&text).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn export_codex_model_mapping_file(
+    #[allow(non_snake_case)] filePath: String,
+    models: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let normalized = crate::codex_config::parse_codex_model_catalog_import(
+        &serde_json::json!({ "models": models }).to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    let payload = serde_json::json!({
+        "format": "cc-switch-model-mapping",
+        "version": 1,
+        "models": normalized["models"],
+    });
+    crate::config::write_json_file(std::path::Path::new(&filePath), &payload)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn test_api_endpoints(
     urls: Vec<String>,
     #[allow(non_snake_case)] timeoutSecs: Option<u64>,

@@ -9,6 +9,7 @@ import {
 } from "@/utils/providerConfigUtils";
 import { normalizeTomlText } from "@/utils/textNormalization";
 import type { CodexCatalogModel } from "@/types";
+import { normalizeCodexRouteMode } from "@/utils/codexRouteMode";
 
 interface UseCodexConfigStateProps {
   initialData?: {
@@ -68,6 +69,13 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
         : undefined;
   return {
     model: typeof item?.model === "string" ? item.model : "",
+    ...(normalizeCodexRouteMode(item?.routeMode ?? item?.route_mode)
+      ? {
+          routeMode: normalizeCodexRouteMode(
+            item?.routeMode ?? item?.route_mode,
+          ),
+        }
+      : {}),
     displayName:
       typeof item?.displayName === "string"
         ? item.displayName

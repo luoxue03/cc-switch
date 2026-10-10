@@ -1,4 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { HoverTip } from "@/components/ui/hover-tip";
@@ -37,6 +62,9 @@ import {
   ChevronRight,
   ChevronsUpDown,
   Download,
+  FileInput,
+  FileOutput,
+  GripVertical,
   Loader2,
   Plus,
   Star,
@@ -81,6 +109,11 @@ import type {
 } from "@/types";
 import type { ManagedAuthProvider } from "@/lib/api";
 import type { AppId } from "@/lib/api";
+import { providersApi } from "@/lib/api/providers";
+import {
+  defaultCodexRouteMode,
+  normalizeCodexRouteMode,
+} from "@/utils/codexRouteMode";
 
 interface EndpointCandidate {
   url: string;
@@ -213,6 +246,7 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   return {
     rowId: crypto.randomUUID(),
     model: seed?.model ?? "",
+    ...(seed?.routeMode ? { routeMode: seed.routeMode } : {}),
     displayName: seed?.displayName ?? "",
     contextWindow: seed?.contextWindow ?? "",
     // Carry native-profile overrides verbatim (not user-editable in the row UI,
@@ -246,6 +280,7 @@ function catalogRowsMatchModels(
     const incoming = models[i];
     return (
       row.model === (incoming.model ?? "") &&
+      row.routeMode === incoming.routeMode &&
       (row.displayName ?? "") === (incoming.displayName ?? "") &&
       String(row.contextWindow ?? "") ===
         String(incoming.contextWindow ?? "") &&
@@ -260,6 +295,54 @@ function catalogRowsMatchModels(
         (incoming.defaultReasoningLevel ?? "")
     );
   });
+}
+
+function SortableCatalogRow({
+  id,
+  label,
+  className,
+  children,
+}: {
+  id: string;
+  label: string;
+  className: string;
+  children: ReactNode;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+  return (
+    <div
+      ref={setNodeRef}
+      className={cn(
+        className,
+        isDragging && "relative z-10 bg-background opacity-80",
+      )}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+    >
+      <HoverTip content={label}>
+        <Button
+          ref={setActivatorNodeRef}
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-9 w-7 touch-none cursor-grab active:cursor-grabbing"
+          {...attributes}
+          {...listeners}
+          aria-label={label}
+        >
+          <GripVertical className="h-4 w-4" />
+        </Button>
+      </HoverTip>
+      {children}
+    </div>
+  );
 }
 
 // Reasoning effort levels Codex understands, in ascending depth order. The
@@ -580,6 +663,23 @@ export function CodexFormFields({
   // 对应词条在 grokBuild.* 下。
   const isGrokBuild = appId === "grokbuild";
   const canEditCatalog = Boolean(onCatalogModelsChange);
+  const canEditRouteMode =
+    appId === "codex" &&
+    !isCopilotPreset &&
+    !isXaiOauthPreset &&
+    !isCodexOauthPreset &&
+    category !== "official";
+  const fallbackRouteMode = defaultCodexRouteMode(effectiveApiFormat);
+  const catalogSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+  const [isImportingCatalog, setIsImportingCatalog] = useState(false);
+  const [isExportingCatalog, setIsExportingCatalog] = useState(false);
+  const catalogOwnerRef = useRef(providerId);
+  catalogOwnerRef.current = providerId;
   const canEditReasoning = Boolean(onCodexChatReasoningChange);
   const supportsThinking =
     codexChatReasoning.supportsThinking === true ||
@@ -883,6 +983,88 @@ export function CodexFormFields({
     setCatalogRows((current) => [...current, createCatalogRow()]);
   }, [onCatalogModelsChange]);
 
+  const handleCatalogDragEnd = ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id) return;
+    const rows = catalogRowsRef.current;
+    const from = rows.findIndex((row) => row.rowId === active.id);
+    const to = rows.findIndex((row) => row.rowId === over.id);
+    if (from >= 0 && to >= 0) commitCatalogRows(arrayMove(rows, from, to));
+  };
+
+  const handleImportCatalog = async () => {
+    const owner = providerId;
+    setIsImportingCatalog(true);
+    try {
+      const filePath = await open({
+        title: t("codexConfig.importCatalog"),
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!filePath) return;
+      const catalog = await providersApi.readCodexModelCatalogFile(filePath);
+      if (catalogOwnerRef.current !== owner) return;
+      const previous = new Map(
+        catalogRowsRef.current.map((row) => [row.model.trim(), row.routeMode]),
+      );
+      commitCatalogRows(
+        catalog.models.map((model) =>
+          createCatalogRow({
+            ...model,
+            ...(canEditRouteMode
+              ? {
+                  routeMode:
+                    model.routeMode ??
+                    previous.get(model.model) ??
+                    fallbackRouteMode,
+                }
+              : {}),
+          }),
+        ),
+      );
+      toast.success(
+        t("codexConfig.importCatalogSuccess", { count: catalog.models.length }),
+      );
+    } catch (error) {
+      toast.error(t("codexConfig.importCatalogFailed"), {
+        description: String(error),
+      });
+    } finally {
+      setIsImportingCatalog(false);
+    }
+  };
+
+  const handleExportCatalog = async () => {
+    const models = catalogRowsRef.current
+      .filter((row) => row.model.trim())
+      .map(({ rowId: _rowId, ...model }) => ({
+        ...model,
+        ...(canEditRouteMode
+          ? { routeMode: model.routeMode ?? fallbackRouteMode }
+          : {}),
+      }));
+    if (models.length === 0) return;
+    setIsExportingCatalog(true);
+    try {
+      const filePath = await save({
+        title: t("codexConfig.exportCatalog"),
+        defaultPath: "cc-switch-model-mapping.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (!filePath) return;
+      await providersApi.exportCodexModelMappingFile(filePath, models);
+      toast.success(
+        t("codexConfig.exportCatalogSuccess", { count: models.length }),
+      );
+    } catch (error) {
+      toast.error(t("codexConfig.exportCatalogFailed"), {
+        description: String(error),
+      });
+    } finally {
+      setIsExportingCatalog(false);
+    }
+  };
+
   // Stack 布局没有默认模型字段，★ 标出的就是 `model`：它不在列表里时哪一行都不标；没填时
   // 保存会用第一行，所以标第一行。
   const trimmedDefaultModel = codexModel.trim();
@@ -1030,7 +1212,45 @@ export function CodexFormFields({
   ]);
 
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
-    <div className="flex gap-1">
+    <div className="flex flex-wrap justify-end gap-1">
+      <HoverTip content={t("codexConfig.importCatalog")}>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="h-7 w-7"
+          aria-label={t("codexConfig.importCatalog")}
+          disabled={isImportingCatalog || isExportingCatalog}
+          onClick={() => void handleImportCatalog()}
+        >
+          {isImportingCatalog ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <FileInput className="h-3.5 w-3.5" />
+          )}
+        </Button>
+      </HoverTip>
+      <HoverTip content={t("codexConfig.exportCatalog")}>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="h-7 w-7"
+          aria-label={t("codexConfig.exportCatalog")}
+          disabled={
+            isImportingCatalog ||
+            isExportingCatalog ||
+            !catalogRows.some((row) => row.model.trim())
+          }
+          onClick={() => void handleExportCatalog()}
+        >
+          {isExportingCatalog ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <FileOutput className="h-3.5 w-3.5" />
+          )}
+        </Button>
+      </HoverTip>
       <Button
         type="button"
         variant="outline"
@@ -1385,137 +1605,182 @@ export function CodexFormFields({
   };
 
   // 模型映射 / 模型列表的行。Stack 布局多一列 ★（见 renderDefaultStar）。
+  const catalogGridColumns = (withDefault: boolean) =>
+    canEditRouteMode
+      ? withDefault
+        ? "md:grid-cols-[28px_36px_minmax(0,1fr)_minmax(0,1.4fr)_96px_108px_minmax(0,1fr)_36px]"
+        : "md:grid-cols-[28px_minmax(0,1fr)_minmax(0,1.4fr)_96px_108px_minmax(0,1fr)_36px]"
+      : withDefault
+        ? "md:grid-cols-[28px_36px_minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]"
+        : "md:grid-cols-[28px_minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]";
   const renderCatalogRows = (withDefault: boolean) => (
-    <div className="space-y-2">
-      {/* 列头：md+ 显示 */}
-      <div
-        className={cn(
-          "hidden gap-2 px-1 text-xs font-medium text-fg-2 md:grid",
-          withDefault
-            ? "grid-cols-[36px_minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]"
-            : "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]",
-        )}
+    <DndContext
+      sensors={catalogSensors}
+      collisionDetection={closestCenter}
+      onDragEnd={handleCatalogDragEnd}
+    >
+      <SortableContext
+        items={catalogRows.map((row) => row.rowId)}
+        strategy={verticalListSortingStrategy}
       >
-        {withDefault && <span />}
-        <span>
-          {t("codexConfig.catalogColumnDisplay", {
-            defaultValue: "菜单显示名",
-          })}
-        </span>
-        <span>
-          {t("codexConfig.catalogColumnModel", {
-            defaultValue: "实际请求模型",
-          })}
-        </span>
-        <span>
-          {t("codexConfig.catalogColumnContext", {
-            defaultValue: "上下文窗口",
-          })}
-        </span>
-        <span>
-          {t("codexConfig.catalogColumnReasoning", {
-            defaultValue: "思考等级",
-          })}
-        </span>
-        <span />
-      </div>
-
-      {catalogRows.map((row, index) => (
-        <div
-          key={row.rowId}
-          className={cn(
-            "grid grid-cols-1 gap-2",
-            withDefault
-              ? "md:grid-cols-[36px_minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]"
-              : "md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]",
-          )}
-        >
-          {withDefault && renderDefaultStar(index)}
-          <Input
-            value={row.displayName ?? ""}
-            onChange={(event) =>
-              handleUpdateCatalogRow(index, {
-                displayName: event.target.value,
-              })
-            }
-            placeholder={t("codexConfig.catalogDisplayNamePlaceholder", {
-              defaultValue: "例如: DeepSeek V4 Flash",
-            })}
-            aria-label={t("codexConfig.catalogColumnDisplay", {
-              defaultValue: "菜单显示名",
-            })}
-          />
-          <div className="flex gap-1">
-            <Input
-              value={row.model}
-              onChange={(event) =>
-                handleUpdateCatalogRow(index, {
-                  model: event.target.value,
-                })
-              }
-              placeholder={t("codexConfig.catalogModelPlaceholder", {
-                defaultValue: "例如: deepseek-v4-flash",
+        <div className="space-y-2">
+          {/* 列头：md+ 显示 */}
+          <div
+            className={cn(
+              "hidden gap-2 px-1 text-xs font-medium text-fg-2 md:grid",
+              catalogGridColumns(withDefault),
+            )}
+          >
+            <span />
+            {withDefault && <span />}
+            <span>
+              {t("codexConfig.catalogColumnDisplay", {
+                defaultValue: "菜单显示名",
               })}
-              aria-label={t("codexConfig.catalogColumnModel", {
+            </span>
+            <span>
+              {t("codexConfig.catalogColumnModel", {
                 defaultValue: "实际请求模型",
               })}
-              className="flex-1"
-            />
-            {fetchedModels.length > 0 && (
-              <ModelDropdown
-                models={fetchedModels}
-                onSelect={(id) =>
-                  handleSelectFetchedCatalogModel(row.rowId, id)
+            </span>
+            <span>
+              {t("codexConfig.catalogColumnContext", {
+                defaultValue: "上下文窗口",
+              })}
+            </span>
+            {canEditRouteMode && (
+              <span>{t("codexConfig.catalogColumnRouteMode")}</span>
+            )}
+            <span>
+              {t("codexConfig.catalogColumnReasoning", {
+                defaultValue: "思考等级",
+              })}
+            </span>
+            <span />
+          </div>
+
+          {catalogRows.map((row, index) => (
+            <SortableCatalogRow
+              key={row.rowId}
+              id={row.rowId}
+              label={t("codexConfig.reorderCatalogModel", {
+                model: row.displayName || row.model || String(index + 1),
+              })}
+              className={cn(
+                "grid grid-cols-1 gap-2",
+                catalogGridColumns(withDefault),
+              )}
+            >
+              {withDefault && renderDefaultStar(index)}
+              <Input
+                value={row.displayName ?? ""}
+                onChange={(event) =>
+                  handleUpdateCatalogRow(index, {
+                    displayName: event.target.value,
+                  })
+                }
+                placeholder={t("codexConfig.catalogDisplayNamePlaceholder", {
+                  defaultValue: "例如: DeepSeek V4 Flash",
+                })}
+                aria-label={t("codexConfig.catalogColumnDisplay", {
+                  defaultValue: "菜单显示名",
+                })}
+              />
+              <div className="flex gap-1">
+                <Input
+                  value={row.model}
+                  onChange={(event) =>
+                    handleUpdateCatalogRow(index, {
+                      model: event.target.value,
+                    })
+                  }
+                  placeholder={t("codexConfig.catalogModelPlaceholder", {
+                    defaultValue: "例如: deepseek-v4-flash",
+                  })}
+                  aria-label={t("codexConfig.catalogColumnModel", {
+                    defaultValue: "实际请求模型",
+                  })}
+                  className="flex-1"
+                />
+                {fetchedModels.length > 0 && (
+                  <ModelDropdown
+                    models={fetchedModels}
+                    onSelect={(id) =>
+                      handleSelectFetchedCatalogModel(row.rowId, id)
+                    }
+                  />
+                )}
+              </div>
+              <Input
+                type="number"
+                min={1}
+                inputMode="numeric"
+                value={row.contextWindow ?? ""}
+                onChange={(event) =>
+                  handleUpdateCatalogRow(index, {
+                    contextWindow: event.target.value.replace(/[^\d]/g, ""),
+                  })
+                }
+                placeholder={t("codexConfig.contextWindowPlaceholder", {
+                  defaultValue: "例如: 128000",
+                })}
+                aria-label={t("codexConfig.catalogColumnContext", {
+                  defaultValue: "上下文窗口",
+                })}
+              />
+              {canEditRouteMode && (
+                <Select
+                  value={row.routeMode ?? fallbackRouteMode}
+                  onValueChange={(value) =>
+                    handleUpdateCatalogRow(index, {
+                      routeMode: normalizeCodexRouteMode(value),
+                    })
+                  }
+                >
+                  <SelectTrigger
+                    className="min-w-0"
+                    aria-label={t("codexConfig.catalogColumnRouteMode")}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="chat">Chat</SelectItem>
+                    <SelectItem value="responses">Responses</SelectItem>
+                    <SelectItem value="anthropic">Anthropic</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
+              <ReasoningLevelsEditor
+                levels={row.reasoningLevels}
+                defaultLevel={row.defaultReasoningLevel}
+                onLevelsChange={(levels) =>
+                  handleUpdateCatalogRow(index, {
+                    reasoningLevels: levels,
+                  })
+                }
+                onDefaultLevelChange={(level) =>
+                  handleUpdateCatalogRow(index, {
+                    defaultReasoningLevel: level,
+                  })
                 }
               />
-            )}
-          </div>
-          <Input
-            type="number"
-            min={1}
-            inputMode="numeric"
-            value={row.contextWindow ?? ""}
-            onChange={(event) =>
-              handleUpdateCatalogRow(index, {
-                contextWindow: event.target.value.replace(/[^\d]/g, ""),
-              })
-            }
-            placeholder={t("codexConfig.contextWindowPlaceholder", {
-              defaultValue: "例如: 128000",
-            })}
-            aria-label={t("codexConfig.catalogColumnContext", {
-              defaultValue: "上下文窗口",
-            })}
-          />
-          <ReasoningLevelsEditor
-            levels={row.reasoningLevels}
-            defaultLevel={row.defaultReasoningLevel}
-            onLevelsChange={(levels) =>
-              handleUpdateCatalogRow(index, {
-                reasoningLevels: levels,
-              })
-            }
-            onDefaultLevelChange={(level) =>
-              handleUpdateCatalogRow(index, {
-                defaultReasoningLevel: level,
-              })
-            }
-          />
-          <HoverTip content={t("common.delete", { defaultValue: "删除" })}>
-            <Button
-              aria-label={t("common.delete", { defaultValue: "删除" })}
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-9 w-9 text-fg-2 hover:text-destructive"
-              onClick={() => handleRemoveCatalogRow(index)}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </HoverTip>
+              <HoverTip content={t("common.delete", { defaultValue: "删除" })}>
+                <Button
+                  aria-label={t("common.delete", { defaultValue: "删除" })}
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 text-fg-2 hover:text-destructive"
+                  onClick={() => handleRemoveCatalogRow(index)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </HoverTip>
+            </SortableCatalogRow>
+          ))}
         </div>
-      ))}
-    </div>
+      </SortableContext>
+    </DndContext>
   );
 
   const oauthSections = (

@@ -1003,6 +1003,8 @@ pub(crate) fn provider_needs_routing(app: &AppType, provider: &Provider) -> bool
         AppType::Codex | AppType::GrokBuild => {
             managed_oauth
                 || full_url
+                || (*app == AppType::Codex
+                    && crate::proxy::providers::codex::codex_catalog_needs_routing(provider))
                 || matches!(api_format, Some("openai_chat" | "anthropic"))
                 || provider
                     .settings_config

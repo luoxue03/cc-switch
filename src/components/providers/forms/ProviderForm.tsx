@@ -136,6 +136,10 @@ import { resolveManagedAccountId } from "@/lib/authBinding";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
 import { resolveCodexOfficialIdentity } from "@/utils/providerCapabilities";
+import {
+  defaultCodexRouteMode,
+  normalizeCodexRouteMode,
+} from "@/utils/codexRouteMode";
 
 type PresetEntry = {
   id: string;
@@ -191,6 +195,9 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
+      ...(normalizeCodexRouteMode(item.routeMode)
+        ? { routeMode: normalizeCodexRouteMode(item.routeMode) }
+        : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
       // Native Responses profile overrides (ignored by the chat/proxy profile).
@@ -914,10 +921,6 @@ function ProviderFormFull({
     (appId === "codex" && hasManagedCopilotIdentity) ||
     (appId === "claude" &&
       (hasManagedCopilotIdentity || baseUrl.includes("githubcopilot.com")));
-  // Auto can select Chat per request, so retain Chat-only options for that path.
-  const isCodexChatFormat = isCopilotProvider
-    ? effectiveCodexCopilotApiFormat !== "openai_responses"
-    : localCodexApiFormat === "openai_chat";
   const isClaudeCodexOauthProvider =
     appId === "claude" &&
     (presetProviderType === "codex_oauth" ||
@@ -1662,7 +1665,17 @@ function ProviderFormFull({
         // 留空归一化为 [] 即不写。后端只看 modelCatalog.models 是否非空。
         const normalizedCatalogModels =
           category !== "official"
-            ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
+            ? normalizeCodexCatalogModelsForSave(codexCatalogModels).map(
+                (model) =>
+                  isCopilotProvider || isXaiOauthProvider
+                    ? model
+                    : {
+                        ...model,
+                        routeMode:
+                          model.routeMode ??
+                          defaultCodexRouteMode(localCodexApiFormat),
+                      },
+              )
             : [];
         // The default-model field writes the top-level `model` into the TOML
         // as the user types; only when it was left empty fall back to the
@@ -1909,13 +1922,12 @@ function ProviderFormFull({
           : undefined,
       codexFastMode: isClaudeCodexOauthProvider ? codexFastMode : undefined,
       codexChatReasoning:
-        appId === "codex" && category !== "official" && isCodexChatFormat
+        appId === "codex" && category !== "official"
           ? normalizeCodexChatReasoningForSave(codexChatReasoning)
           : undefined,
       promptCacheRouting:
         appId === "codex" &&
         category !== "official" &&
-        isCodexChatFormat &&
         promptCacheRouting !== "auto"
           ? promptCacheRouting
           : undefined,
@@ -1949,23 +1961,20 @@ function ProviderFormFull({
           ? localApiKeyField
           : appId === "codex" &&
               category !== "official" &&
-              localCodexApiFormat === "anthropic" &&
               localCodexAnthropicAuthField !== "ANTHROPIC_AUTH_TOKEN"
             ? localCodexAnthropicAuthField
             : undefined,
-      // Off by default; persist true only for codex+anthropic when the user explicitly enables it
+      // Keep per-provider protocol settings when switching the format selector.
       impersonateClaudeCode:
         appId === "codex" &&
         category !== "official" &&
-        localCodexApiFormat === "anthropic" &&
         localCodexImpersonateClaudeCode
           ? true
           : undefined,
-      // Persist only for codex+anthropic when a positive value was entered
+      // Only the Anthropic conversion consumes this value.
       maxOutputTokens:
         appId === "codex" &&
         category !== "official" &&
-        localCodexApiFormat === "anthropic" &&
         localCodexMaxOutputTokens.trim() !== "" &&
         Number(localCodexMaxOutputTokens) > 0
           ? Number(localCodexMaxOutputTokens)

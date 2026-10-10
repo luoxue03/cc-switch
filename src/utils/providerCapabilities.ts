@@ -2,6 +2,7 @@ import type { AppId } from "@/lib/api";
 import type { Provider } from "@/types";
 import { isOAuthProviderType } from "@/config/constants";
 import { resolveManagedAccountId } from "@/lib/authBinding";
+import { normalizeCodexRouteMode } from "@/utils/codexRouteMode";
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
@@ -165,6 +166,20 @@ export function providerNeedsRouting(
   }
 
   if (appId === "codex" || appId === "grokbuild") {
+    const catalog = provider.settingsConfig.modelCatalog as
+      | { models?: Record<string, unknown>[] }
+      | undefined;
+    if (
+      appId === "codex" &&
+      Array.isArray(catalog?.models) &&
+      catalog.models.some((model) => {
+        const mode = normalizeCodexRouteMode(
+          model?.routeMode ?? model?.route_mode,
+        );
+        return mode === "chat" || mode === "anthropic";
+      })
+    )
+      return true;
     const fmt = provider.meta?.apiFormat;
     // Codex 原生是 Responses，仅 Chat / Anthropic 需要转换（Responses 直连）。
     if (
