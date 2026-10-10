@@ -8,7 +8,6 @@ use crate::config::{
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -26,14 +25,6 @@ const CODEX_PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-// Generating a ProxyChat catalog only needs one stable Codex model template per
-// process. Without this cache every provider switch/takeover can start the
-// Codex CLI again, which is especially expensive for npm-installed `codex.cmd`
-// on Windows. Tests deliberately bypass the global cache because they isolate
-// CODEX_HOME and seed different model templates.
-#[cfg(not(test))]
-static CODEX_MODEL_CATALOG_TEMPLATE_CACHE: OnceCell<Value> = OnceCell::new();
 
 /// Top-level `config.toml` key that controls Codex's built-in web-search tool.
 pub(crate) const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
@@ -151,7 +142,6 @@ fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
     }
     false
 }
-const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 const CODEX_MANAGED_OAUTH_LIVE_AUTH_MARKER_FILENAME: &str = "codex_managed_oauth_live_auth.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1658,6 +1648,12 @@ fn codex_catalog_model_entry(
         return json!({});
     };
 
+    // Every row in CC Switch's model catalog is explicitly user-selected.
+    // The gpt-5.5 cache template may be hidden because it is a retired
+    // built-in model; carrying that flag over would hide routed Chat models
+    // such as DeepSeek and GLM from Codex's picker.
+    entry_obj.insert("visibility".to_string(), json!("list"));
+
     let display_name = spec.display_name.as_deref().unwrap_or(&spec.model);
     let context_window = spec.context_window.unwrap_or(default_context_window);
     entry_obj.insert("slug".to_string(), json!(spec.model));
@@ -1901,30 +1897,6 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
     specs
 }
 
-fn find_codex_model_template(catalog: &Value) -> Option<Value> {
-    catalog
-        .get("models")
-        .and_then(|models| models.as_array())
-        .and_then(|models| {
-            models.iter().find(|model| {
-                model.get("slug").and_then(|slug| slug.as_str())
-                    == Some(CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
-            })
-        })
-        .cloned()
-}
-
-fn load_codex_model_template_from_cache() -> Result<Option<Value>, AppError> {
-    let path = get_codex_config_dir().join("models_cache.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let text = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
-    let catalog: Value = serde_json::from_str(&text).map_err(|e| AppError::json(&path, e))?;
-    Ok(find_codex_model_template(&catalog))
-}
-
 /// Fixed candidates for locating the `codex` CLI when it is not on the process
 /// PATH (common in GUI apps launched outside a terminal).
 const CODEX_CLI_FIXED_CANDIDATES: &[&str] = &[
@@ -2103,57 +2075,21 @@ fn codex_bundled_models_command(candidate: &Path) -> Command {
     command
 }
 
-fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
-    for candidate in codex_cli_candidates() {
-        let candidate_label = candidate.to_string_lossy();
-        let output = match codex_bundled_models_command(&candidate).output() {
-            Ok(output) => output,
-            Err(err) => {
-                log::debug!("failed to run `{candidate_label} debug models --bundled`: {err}");
-                continue;
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log::debug!("`{candidate_label} debug models --bundled` failed: {stderr}");
-            continue;
-        }
-
-        let catalog: Value = match serde_json::from_slice(&output.stdout) {
-            Ok(catalog) => catalog,
-            Err(e) => {
-                log::debug!(
-                    "Failed to parse `{candidate_label} debug models --bundled` output: {e}"
-                );
-                continue;
-            }
-        };
-        if let Some(template) = find_codex_model_template(&catalog) {
-            return Ok(Some(template));
-        }
-    }
-
-    Ok(None)
-}
-
-fn load_codex_model_template_static() -> Option<Value> {
+/// Stable classic tool contract used by ProxyChat and Copilot catalog rows.
+/// This is deliberately independent of the user's `models_cache.json` and
+/// installed Codex CLI: those sources can carry hidden, retired, or newer
+/// tool metadata that the Chat converter does not understand.
+fn load_codex_classic_tool_template() -> Value {
     let text = include_str!("resources/gpt5_5_template.json");
-    match serde_json::from_str(text) {
-        Ok(template) => Some(template),
-        Err(e) => {
-            log::warn!("Failed to parse bundled gpt-5.5 template: {e}");
-            None
-        }
-    }
+    serde_json::from_str(text).expect("bundled classic tool template must be valid JSON")
 }
 
 /// Bundled clean template for native `/responses` providers. Unlike the
-/// gpt-5.5 template it carries NO freeform `apply_patch` / `web_search` tool
+/// classic tool template it carries NO freeform `apply_patch` / `web_search` tool
 /// declarations and no GPT-5 base_instructions, so Codex never emits a
 /// `type=="custom"` tool that native gateways (MiMo/MiniMax/…) reject. Edits
 /// flow through `shell_type="shell_command"` instead. We deliberately do NOT
-/// fall back to `models_cache.json` here (that would reintroduce gpt-5.5's
+/// fall back to the classic tool template here (that would reintroduce its
 /// freeform apply_patch).
 fn load_codex_native_responses_template() -> Value {
     let text = include_str!("resources/codex_native_responses_template.json");
@@ -2189,7 +2125,7 @@ fn load_codex_deepseek_official_catalog_models() -> Vec<Value> {
 
 /// Official vendor catalog entries for the provider in `config_text`, if its
 /// gateway ships one. Only the `NativeResponses` profile qualifies: ProxyChat
-/// runs through cc-switch's converter (gpt-5.5 template contract) and the
+/// runs through cc-switch's converter (classic tool template contract) and the
 /// Anthropic transform drops custom tools, so both must keep their existing
 /// templates. Host-driven like the web_search blacklist, so existing providers
 /// pick it up on their next switch without a re-save.
@@ -2243,6 +2179,10 @@ fn codex_vendor_catalog_model_entry(
     let Some(entry_obj) = entry.as_object_mut() else {
         return json!({});
     };
+
+    // A model explicitly present in CC Switch's catalog must remain selectable
+    // even when the vendor's source catalog marks its built-in entry hidden.
+    entry_obj.insert("visibility".to_string(), json!("list"));
 
     if matched.is_none() {
         let display_name = spec.display_name.as_deref().unwrap_or(&spec.model);
@@ -2305,24 +2245,19 @@ fn codex_vendor_catalog_model_entry(
 /// When Codex requires a new field, add it here AND to the static templates.
 const CODEX_CATALOG_PARSER_REQUIRED_FIELDS: &[&str] = &[
     "supports_reasoning_summaries",
-    // codex 0.148.0 rejects the catalog without it (#6661); a models_cache.json
+    // codex 0.148.0 rejects the catalog without it (#6661); an external row
     // written by an older build can lack it.
     "supports_parallel_tool_calls",
 ];
 
-/// `models_cache.json` is shared by every Codex install on the machine (npm
-/// CLI, desktop-bundled binary, ...), and each version serializes its own
-/// `ModelInfo` shape — the cache's field set follows whichever process wrote
-/// it last, so it cannot be assumed to satisfy the current external-catalog
-/// schema (observed live: 0.144.5 requires `supports_reasoning_summaries`
-/// while a coexisting build kept rewriting the cache without it). Backfill
-/// ONLY parser-required fields from the bundled static template: optional
-/// capability fields keep their missing-means-default semantics, and existing
-/// values always win.
+/// Rows that come from outside this repo (official rows from whichever Codex
+/// binary is on the machine, bundled vendor files) follow their writer's
+/// `ModelInfo` shape and cannot be assumed to satisfy the current
+/// external-catalog schema. Backfill ONLY parser-required fields from the
+/// bundled classic tool template: optional capability fields keep their
+/// missing-means-default semantics, and existing values always win.
 fn fill_template_fields_from_static(template: &mut Value) {
-    let Some(static_template) = load_codex_model_template_static() else {
-        return;
-    };
+    let static_template = load_codex_classic_tool_template();
     let (Some(template_obj), Some(static_obj)) =
         (template.as_object_mut(), static_template.as_object())
     else {
@@ -2335,50 +2270,6 @@ fn fill_template_fields_from_static(template: &mut Value) {
             }
         }
     }
-}
-
-fn load_codex_model_catalog_template_uncached() -> Result<Value, AppError> {
-    // ① models_cache.json (created by Codex when it connects to OpenAI)
-    if let Some(mut template) = load_codex_model_template_from_cache()? {
-        fill_template_fields_from_static(&mut template);
-        return Ok(template);
-    }
-    // ② codex CLI (PATH + platform-specific common paths)
-    if let Some(mut template) = load_codex_model_template_from_bundled()? {
-        fill_template_fields_from_static(&mut template);
-        return Ok(template);
-    }
-    // ③ Static fallback bundled at compile time
-    if let Some(template) = load_codex_model_template_static() {
-        return Ok(template);
-    }
-
-    Err(AppError::Message(format!(
-        "Codex model catalog template `{CODEX_MODEL_CATALOG_TEMPLATE_SLUG}` not found. Please start Codex once so models_cache.json is available, or ensure the `codex` CLI is on PATH."
-    )))
-}
-
-fn get_or_load_codex_model_catalog_template<F>(
-    cache: &OnceCell<Value>,
-    loader: F,
-) -> Result<Value, AppError>
-where
-    F: FnOnce() -> Result<Value, AppError>,
-{
-    cache.get_or_try_init(loader).cloned()
-}
-
-#[cfg(not(test))]
-fn load_codex_model_catalog_template() -> Result<Value, AppError> {
-    get_or_load_codex_model_catalog_template(
-        &CODEX_MODEL_CATALOG_TEMPLATE_CACHE,
-        load_codex_model_catalog_template_uncached,
-    )
-}
-
-#[cfg(test)]
-fn load_codex_model_catalog_template() -> Result<Value, AppError> {
-    load_codex_model_catalog_template_uncached()
 }
 
 fn codex_model_catalog_from_specs(
@@ -2432,7 +2323,7 @@ fn codex_model_catalog_from_settings(
         .iter()
         .any(|spec| spec.tool_profile.unwrap_or(profile) == CodexCatalogToolProfile::ProxyChat);
     let proxy_chat_template = if needs_proxy_chat_template {
-        load_codex_model_catalog_template()?
+        load_codex_classic_tool_template()
     } else {
         native_template.clone()
     };
@@ -7060,6 +6951,7 @@ base_url = "https://production.api/v1"
                 .and_then(Value::as_bool),
             Some(true)
         );
+        assert_eq!(catalog["models"][0]["visibility"], json!("list"));
     }
 
     #[test]
@@ -7165,6 +7057,11 @@ base_url = "https://production.api/v1"
                 .get("availability_nux")
                 .is_some_and(|value| value.is_null()),
             "generated third-party entries should not inherit GPT-5.5 launch messaging"
+        );
+        assert_eq!(
+            models[0].get("visibility").and_then(Value::as_str),
+            Some("list"),
+            "explicitly configured routed models must remain visible in Codex"
         );
     }
 
@@ -8552,50 +8449,6 @@ web_search = "disabled"
     }
 
     #[test]
-    fn successful_model_catalog_template_load_is_cached() {
-        use std::cell::Cell;
-
-        let cache = OnceCell::new();
-        let calls = Cell::new(0);
-        let first = get_or_load_codex_model_catalog_template(&cache, || {
-            calls.set(calls.get() + 1);
-            Ok(json!({ "slug": "first" }))
-        })
-        .expect("first template load");
-        let second = get_or_load_codex_model_catalog_template(&cache, || {
-            calls.set(calls.get() + 1);
-            Ok(json!({ "slug": "second" }))
-        })
-        .expect("cached template load");
-
-        assert_eq!(first, json!({ "slug": "first" }));
-        assert_eq!(second, first);
-        assert_eq!(calls.get(), 1, "successful template should load only once");
-    }
-
-    #[test]
-    fn failed_model_catalog_template_load_can_retry() {
-        use std::cell::Cell;
-
-        let cache = OnceCell::new();
-        let calls = Cell::new(0);
-        let first = get_or_load_codex_model_catalog_template(&cache, || {
-            calls.set(calls.get() + 1);
-            Err(AppError::Message("temporary failure".to_string()))
-        });
-        assert!(first.is_err());
-
-        let second = get_or_load_codex_model_catalog_template(&cache, || {
-            calls.set(calls.get() + 1);
-            Ok(json!({ "slug": "recovered" }))
-        })
-        .expect("retry template load");
-
-        assert_eq!(second, json!({ "slug": "recovered" }));
-        assert_eq!(calls.get(), 2, "failed loads must not poison the cache");
-    }
-
-    #[test]
     fn codex_cli_candidates_include_user_node_manager_bins() {
         let temp_home = tempfile::tempdir().expect("create temp home");
         let home = temp_home.path();
@@ -8648,20 +8501,18 @@ web_search = "disabled"
     }
 
     #[test]
-    fn static_template_is_valid_json_with_slug() {
-        let template =
-            load_codex_model_template_static().expect("static template must parse as valid JSON");
+    fn classic_tool_template_is_valid_json_with_slug() {
+        let template = load_codex_classic_tool_template();
         assert_eq!(
             template.get("slug").and_then(|v| v.as_str()),
             Some("gpt-5.5"),
-            "static template slug must be gpt-5.5"
+            "classic tool template slug must be gpt-5.5"
         );
     }
 
     #[test]
-    fn static_template_has_required_keys() {
-        let template =
-            load_codex_model_template_static().expect("static template must parse as valid JSON");
+    fn classic_tool_template_has_required_keys() {
+        let template = load_codex_classic_tool_template();
         for key in &[
             "model_messages",
             "base_instructions",
@@ -8670,9 +8521,49 @@ web_search = "disabled"
         ] {
             assert!(
                 template.get(key).is_some(),
-                "static template must contain key '{key}'"
+                "classic tool template must contain key '{key}'"
             );
         }
+        assert_eq!(template["visibility"], "list");
+        assert_eq!(template["shell_type"], "unified_exec");
+    }
+
+    #[test]
+    #[serial]
+    fn proxy_chat_catalog_ignores_models_cache() {
+        let home = CodexLiveTestHome::new();
+        let codex_dir = home._dir.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        std::fs::write(
+            codex_dir.join("models_cache.json"),
+            json!({
+                "models": [{
+                    "slug": "gpt-5.5",
+                    "visibility": "hide",
+                    "shell_type": "code_mode_only",
+                    "base_instructions": "hostile cached template"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write hostile cache");
+
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "glm-5.3" }] }
+        });
+        let config_text = "model_provider = \"custom\"\nmodel = \"glm-5.3\"\n\n[model_providers.custom]\nbase_url = \"https://relay.example/v1\"\nwire_api = \"chat\"\n";
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            config_text,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["slug"], "glm-5.3");
+        assert_eq!(entry["visibility"], "list");
+        assert_eq!(entry["shell_type"], "unified_exec");
+        assert_ne!(entry["base_instructions"], "hostile cached template");
     }
 
     #[test]
