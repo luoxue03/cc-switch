@@ -747,10 +747,11 @@ fn append_responses_item_as_chat_message(
                 last_assistant_index,
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-            let mut transformed_item = item.clone();
-            if let Some(output) = transformed_item.get_mut("output") {
+            let mut cleaned_item = item.clone();
+            if let Some(output) = cleaned_item.get_mut("output") {
                 strip_internal_chat_metadata_from_tool_output(output);
             }
+            let mut transformed_item = cleaned_item.clone();
             let replacement_block = json!({
                 "type": "text",
                 "text": TOOL_RESULT_MEDIA_MOVED_MARKER
@@ -772,8 +773,8 @@ fn append_responses_item_as_chat_message(
                 queue_chat_tool_output_media(pending_media, call_id, media_parts);
                 canonical_json_string(&transformed_item)
             } else {
-                // Preserve the legacy whole-item representation exactly.
-                canonical_json_string(item)
+                // Preserve the whole-item representation, excluding internal metadata.
+                canonical_json_string(&cleaned_item)
             };
             messages.push(json!({
                 "role": "tool",

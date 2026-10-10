@@ -1004,7 +1004,7 @@ pub(crate) fn provider_needs_routing(app: &AppType, provider: &Provider) -> bool
             managed_oauth
                 || full_url
                 || (*app == AppType::Codex
-                    && crate::proxy::providers::codex::codex_catalog_needs_routing(provider))
+                    && crate::proxy::providers::codex_catalog_needs_routing(provider))
                 || matches!(api_format, Some("openai_chat" | "anthropic"))
                 || provider
                     .settings_config

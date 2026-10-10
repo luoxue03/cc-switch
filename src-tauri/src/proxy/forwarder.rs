@@ -1972,7 +1972,7 @@ impl RequestForwarder {
             && !codex_responses_to_chat
             && !codex_responses_to_anthropic
         {
-            super::providers::codex::sanitize_codex_responses_passthrough_body(
+            super::providers::sanitize_codex_responses_passthrough_body(
                 &mut request_body,
                 provider,
             )?;
@@ -2098,6 +2098,7 @@ impl RequestForwarder {
         let mut log_secrets: Vec<String> = Vec::new();
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
             if matches!(app_type, AppType::Codex)
+                && super::providers::is_codex_responses_endpoint(endpoint)
                 && !codex_official_auth_passthrough
                 && matches!(
                     auth.strategy,

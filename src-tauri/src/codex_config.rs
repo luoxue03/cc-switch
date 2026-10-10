@@ -2417,6 +2417,22 @@ pub(crate) fn codex_disables_web_search(
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> bool {
+    let specs = codex_catalog_model_specs(settings);
+    if profile != CodexCatalogToolProfile::Copilot
+        && specs.iter().any(|spec| spec.tool_profile.is_some())
+    {
+        // Converted rows drop hosted tools themselves. Do not globally disable
+        // web search for a native Responses row in the same mixed catalog.
+        return specs
+            .iter()
+            .all(|spec| match spec.tool_profile.unwrap_or(profile) {
+                CodexCatalogToolProfile::Anthropic | CodexCatalogToolProfile::Copilot => true,
+                CodexCatalogToolProfile::NativeResponses => {
+                    codex_native_gateway_rejects_web_search(config_text)
+                }
+                CodexCatalogToolProfile::ProxyChat => false,
+            });
+    }
     match profile {
         CodexCatalogToolProfile::Anthropic | CodexCatalogToolProfile::Copilot => true,
         CodexCatalogToolProfile::NativeResponses => {
@@ -2755,10 +2771,10 @@ pub(crate) fn parse_codex_model_catalog_import(text: &str) -> Result<Value, AppE
                 object.insert("model".to_string(), slug);
             }
         }
-        if !object
+        if object
             .get("model")
             .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty())
+            .is_none_or(|id| id.trim().is_empty())
         {
             return Err(AppError::Config(format!(
                 "Missing model name in catalog row {index}"
@@ -3431,6 +3447,16 @@ requires_openai_auth = true
             { "model": "relay-responses", "route_mode": "responses", "reasoningLevels": ["medium", "high"] },
             { "model": "relay-anthropic", "routeMode": "anthropic", "reasoningLevels": ["low", "high"] }
         ] }});
+        assert!(!codex_disables_web_search(
+            &settings,
+            "",
+            CodexCatalogToolProfile::Anthropic
+        ));
+        assert!(codex_disables_web_search(
+            &settings,
+            "",
+            CodexCatalogToolProfile::Copilot
+        ));
         for fallback in [
             CodexCatalogToolProfile::ProxyChat,
             CodexCatalogToolProfile::NativeResponses,
