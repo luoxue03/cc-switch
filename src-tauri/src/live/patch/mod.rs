@@ -47,6 +47,9 @@ impl fmt::Display for KeyPath {
 
 /// 在内存里算出一个文件的新内容。
 pub trait LivePatch {
+    fn is_explicit_codex_edit(&self) -> bool {
+        false
+    }
     fn apply(&self, path: &Path, pre: Option<&[u8]>) -> Result<Vec<u8>, LiveWriteError>;
 
     /// 引擎实际调用的入口：`None` 表示删掉这个文件（比如 Codex 切到第三方时删
@@ -115,6 +118,12 @@ impl LivePatch for WholeFile {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LiveWriteError {
+    #[error("Codex 配置项保护 / Config protection: {keys:?}. {reason} ({path})。请手动调整配置或取消对应保护；本次操作未完成")]
+    Protected {
+        path: PathBuf,
+        keys: Vec<String>,
+        reason: String,
+    },
     /// 文件解析不了。行号、列号从 1 开始。
     #[error("无法解析 {path}（第 {line} 行第 {column} 列）: {message}")]
     Parse {
@@ -154,6 +163,10 @@ impl From<LiveWriteError> for crate::error::AppError {
     fn from(err: LiveWriteError) -> Self {
         use crate::error::AppError;
         match err {
+            LiveWriteError::Protected { path, keys, reason } => AppError::Message(format!(
+                "Codex 配置项保护 / Config protection: {} ({keys:?}). {reason}。请在设置 → 应用配置 → Codex 中手动调整 TOML 或取消对应保护后重试；本次操作未完成",
+                path.display()
+            )),
             LiveWriteError::Parse {
                 path,
                 line,

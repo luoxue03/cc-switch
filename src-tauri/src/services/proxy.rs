@@ -91,6 +91,15 @@ impl ProxyService {
     pub async fn stop(&self) -> Result<(), String> {
         let result = self.stop_server().await;
         self.notify_tray().await;
+        if result.is_ok() {
+            if let Some(warning) = crate::codex_protection::proxy_dependency_warning() {
+                self.emit(
+                    "codex-protection-warning",
+                    serde_json::json!({ "message": warning }),
+                )
+                .await;
+            }
+        }
         result
     }
 
@@ -474,6 +483,12 @@ impl ProxyService {
 
         // 保存到数据库（保持 live_takeover_active 状态不变）
         let mut new_config = config.clone();
+        crate::codex_protection::check_proxy_address_change(
+            &previous.listen_address,
+            previous.listen_port,
+            &config.listen_address,
+            config.listen_port,
+        )?;
         new_config.live_takeover_active = previous.live_takeover_active;
 
         self.db
@@ -498,6 +513,12 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取全局代理配置失败: {e}"))?;
 
+        crate::codex_protection::check_proxy_address_change(
+            &previous.listen_address,
+            previous.listen_port,
+            &config.listen_address,
+            config.listen_port,
+        )?;
         self.db
             .update_global_proxy_config(config.clone())
             .await

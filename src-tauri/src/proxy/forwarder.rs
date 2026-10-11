@@ -1878,11 +1878,19 @@ impl RequestForwarder {
             // accepted by every current Claude model and virtually all gateways. The
             // transform clamps any thinking budget below this value.
             const DEFAULT_CODEX_ANTHROPIC_MAX_TOKENS: u64 = 8192;
-            let mut anthropic_body =
+            let capability_model = super::providers::codex_capability_model(provider, &mapped_body);
+            let mut anthropic_body = if capability_model.is_some() {
+                super::providers::transform_codex_anthropic::responses_request_to_anthropic_with_capability(
+                    mapped_body,
+                    DEFAULT_CODEX_ANTHROPIC_MAX_TOKENS,
+                    capability_model,
+                )?
+            } else {
                 super::providers::transform_codex_anthropic::responses_request_to_anthropic(
                     mapped_body,
                     DEFAULT_CODEX_ANTHROPIC_MAX_TOKENS,
-                )?;
+                )?
+            };
             // Handle the 1M-context marker [1m]: strip the model-name suffix (the
             // gateway doesn't recognize it) and set the flag so the beta header is
             // added. apply_codex_upstream_model may have just written back a model

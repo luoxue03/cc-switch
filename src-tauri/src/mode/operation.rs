@@ -210,7 +210,7 @@ pub fn recover(
     guard: &AppWriteGuard,
     commit_target: CommitTarget<'_>,
 ) -> Result<Option<RecoveryOutcome>, AppError> {
-    let Some(pending) = state::pending(store, guard.app())? else {
+    let Some(mut pending) = state::pending(store, guard.app())? else {
         return Ok(None);
     };
 
@@ -257,6 +257,61 @@ pub fn recover(
     }
 
     let mut skipped = elsewhere();
+    // Protection can change while an interrupted operation is awaiting recovery.
+    // Recheck staged Codex bytes before publishing any remaining file or target state.
+    if pending.op != crate::codex_protection::MANUAL_EDIT {
+        let mut adjusted = false;
+        let mut superseded = Vec::new();
+        for file in &mut pending.files {
+            if !crate::codex_protection::is_config(&file.path) {
+                continue;
+            }
+            let current = read_current(&file.path)?;
+            if digest(current.as_deref()) == file.planned {
+                continue;
+            }
+            let proposed = match &file.staged {
+                Some(staged) => read_current(staged)?,
+                None => None,
+            };
+            if digest(proposed.as_deref()) != file.planned {
+                continue;
+            }
+            if digest(current.as_deref()) != file.pre {
+                crate::codex_protection::validate_recovery_connection(
+                    &file.path,
+                    current.as_deref(),
+                    proposed.as_deref(),
+                )?;
+                continue;
+            }
+            let protected = crate::codex_protection::protect_auto(
+                &file.path,
+                current.as_deref(),
+                proposed.clone(),
+            )?;
+            if protected == proposed {
+                continue;
+            }
+            let next = protected
+                .as_deref()
+                .map(|bytes| {
+                    crate::config::stage_write(&file.path, bytes, Some(0o600), true)
+                        .map(|staged| staged.tmp_path().to_path_buf())
+                })
+                .transpose()?;
+            superseded.push(file.clone());
+            file.staged = next;
+            file.planned = digest(protected.as_deref());
+            adjusted = true;
+        }
+        if adjusted {
+            state::set_pending(store, guard.app(), Some(pending.clone()))?;
+            for file in &superseded {
+                discard_staged(file);
+            }
+        }
+    }
     for (file, at) in pending.files.iter().zip(&positions) {
         if !matches!(at, At::Pre) {
             continue;

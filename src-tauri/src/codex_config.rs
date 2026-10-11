@@ -890,6 +890,12 @@ pub fn write_codex_live_atomic(
     if !cfg_text.trim().is_empty() {
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
+    // Check protected connection fields before touching authentication state.
+    crate::codex_protection::protect_auto(
+        &config_path,
+        _old_config.as_deref(),
+        Some(cfg_text.as_bytes().to_vec()),
+    )?;
 
     // 第一步：写 auth.json
     write_json_file_private(&auth_path, auth)?;
@@ -1440,6 +1446,7 @@ fn codex_catalog_model_entry(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CodexCatalogModelSpec {
     model: String,
+    capability_model: Option<String>,
     tool_profile: Option<CodexCatalogToolProfile>,
     /// Explicit user value only. Entries fall back to the model id — except
     /// official vendor catalog entries, which keep the vendor's display name.
@@ -1562,6 +1569,13 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
+            capability_model: model_config
+                .get("capabilityModel")
+                .or_else(|| model_config.get("capability_model"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
             tool_profile: model_config
                 .get("routeMode")
                 .or_else(|| model_config.get("route_mode"))
@@ -2396,6 +2410,9 @@ fn codex_catalog_from_specs_for_row(
                 entry["routeMode"] = json!(route_mode);
                 entry["priority"] = json!(1000 + index);
             }
+            if let Some(capability_model) = &spec.capability_model {
+                entry["capabilityModel"] = json!(capability_model);
+            }
             entry
         })
         .collect();
@@ -2815,6 +2832,9 @@ pub(crate) fn parse_codex_model_catalog_import(text: &str) -> Result<Value, AppE
         .into_iter()
         .map(|spec| {
             let mut entry = json!({ "model": spec.model });
+            if let Some(value) = spec.capability_model {
+                entry["capabilityModel"] = json!(value);
+            }
             if let Some(value) = spec
                 .tool_profile
                 .and_then(CodexCatalogToolProfile::route_mode)
@@ -2969,6 +2989,12 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
                 .is_some_and(|found| is_codex_official_mirror(entry, model, found))
             {
                 let mut mirrored = json!({ "model": model });
+                if let Some(value) = entry
+                    .get("capabilityModel")
+                    .or_else(|| entry.get("capability_model"))
+                {
+                    mirrored["capabilityModel"] = value.clone();
+                }
                 if let Some(route_mode) = entry.get("routeMode").or_else(|| entry.get("route_mode"))
                 {
                     mirrored["routeMode"] = route_mode.clone();
@@ -2980,6 +3006,12 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
 
         let mut obj = serde_json::Map::new();
         obj.insert("model".to_string(), json!(model));
+        if let Some(value) = entry
+            .get("capabilityModel")
+            .or_else(|| entry.get("capability_model"))
+        {
+            obj.insert("capabilityModel".to_string(), value.clone());
+        }
         if let Some(route_mode) = entry
             .get("routeMode")
             .or_else(|| entry.get("route_mode"))
@@ -3515,6 +3547,23 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn capability_model_survives_import_generated_catalog_and_reverse_projection() {
+        let imported = parse_codex_model_catalog_import(r#"{"models":[{"model":"mcf-2","routeMode":"anthropic","capability_model":"claude-opus-5-5"}]}"#).unwrap();
+        assert_eq!(imported["models"][0]["capabilityModel"], "claude-opus-5-5");
+        let catalog = codex_model_catalog_from_settings(
+            &json!({"modelCatalog":imported}),
+            "",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "mcf-2");
+        let reverse = build_simplified_catalog_from_texts("", &catalog.to_string()).unwrap();
+        assert_eq!(reverse["models"][0]["capabilityModel"], "claude-opus-5-5");
+        assert_eq!(reverse["models"][0]["routeMode"], "anthropic");
+    }
+
+    #[test]
     fn extract_base_url_prefers_active_provider_section() {
         let input = r#"model_provider = "azure"
 
@@ -3981,6 +4030,7 @@ experimental_bearer_token = "stale-table-key"
         let specs = vec![CodexCatalogModelSpec {
             model: "k3".to_string(),
             tool_profile: None,
+            capability_model: None,
             display_name: Some("Kimi K3".to_string()),
             context_window: Some(262_144),
             supports_parallel_tool_calls: None,
@@ -4503,6 +4553,7 @@ experimental_bearer_token = "stale-table-key"
             CodexCatalogModelSpec {
                 model: "gpt-5.4".to_string(),
                 tool_profile: None,
+                capability_model: None,
                 display_name: Some("GPT 5.4".to_string()),
                 context_window: Some(128_000),
                 supports_parallel_tool_calls: None,
@@ -4514,6 +4565,7 @@ experimental_bearer_token = "stale-table-key"
             CodexCatalogModelSpec {
                 model: "qwen/qwen3-coder-plus".to_string(),
                 tool_profile: None,
+                capability_model: None,
                 display_name: Some("Qwen3 Coder Plus".to_string()),
                 context_window: Some(128_000),
                 supports_parallel_tool_calls: None,
@@ -4525,6 +4577,7 @@ experimental_bearer_token = "stale-table-key"
             CodexCatalogModelSpec {
                 model: "glm-5.2v".to_string(),
                 tool_profile: None,
+                capability_model: None,
                 display_name: Some("GLM 5.2V".to_string()),
                 context_window: Some(128_000),
                 supports_parallel_tool_calls: None,
@@ -4536,6 +4589,7 @@ experimental_bearer_token = "stale-table-key"
             CodexCatalogModelSpec {
                 model: "deepseek-v4-flash".to_string(),
                 tool_profile: None,
+                capability_model: None,
                 display_name: Some("Explicit Visual Override".to_string()),
                 context_window: Some(128_000),
                 supports_parallel_tool_calls: None,
@@ -4547,6 +4601,7 @@ experimental_bearer_token = "stale-table-key"
             CodexCatalogModelSpec {
                 model: "custom-text-alias".to_string(),
                 tool_profile: None,
+                capability_model: None,
                 display_name: Some("Explicit Text Override".to_string()),
                 context_window: Some(128_000),
                 supports_parallel_tool_calls: None,
@@ -4859,6 +4914,7 @@ wire_api = "responses"
         let specs = vec![CodexCatalogModelSpec {
             model: "x".to_string(),
             tool_profile: None,
+            capability_model: None,
             display_name: Some("x".to_string()),
             context_window: Some(128_000),
             supports_parallel_tool_calls: None,

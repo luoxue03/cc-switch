@@ -1,4 +1,26 @@
 {
+  "codexProtection": {
+    "title": "設定項目の保護",
+    "refresh": "現在の設定を再読み込み",
+    "saveRules": "保護設定を保存",
+    "rulesSaved": "保護設定を保存しました。TOML は変更していません。",
+    "scope": "選択した項目の現在の内容を自動変更から保護します。手動編集は可能です。すべて解除して保存すると自動管理に戻ります。",
+    "catalogNotice": "model_catalog_json はパスのみを保護し、参照先のカタログファイルは保護しません。配列とテーブル配列は全体を保護します。",
+    "search": "設定項目を絞り込む",
+    "protect": "保護",
+    "key": "設定項目",
+    "value": "現在の値",
+    "absent": "未設定（未設定の状態を保護）",
+    "hidden": "機密値は非表示",
+    "clear": "すべて解除",
+    "edit": "現在の TOML を表示・編集",
+    "manualNotice": "現在のファイルには認証情報が含まれる場合があります。明示的な保存では保護項目も変更できます。外部編集との競合時は上書きしません。",
+    "editor": "現在の Codex TOML",
+    "discard": "編集を破棄して閉じる",
+    "discardRules": "選択の変更を破棄して再読み込み",
+    "saveToml": "TOML を保存",
+    "tomlSaved": "TOML を保存しました。接続の可否は接続先の設定とサービスの稼働状態によって決まります。"
+  },
   "app": {
     "title": "CC Switch",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
@@ -1933,6 +1955,9 @@
     "catalogColumnContext": "コンテキストウィンドウ",
     "catalogColumnReasoning": "思考レベル",
     "catalogColumnRouteMode": "ルート形式",
+    "capabilityModel": "能力参照モデル",
+    "capabilityModelAuto": "自動判定",
+    "capabilityModelHint": "思考の互換性判定にのみ使用し、送信するモデル名は変更しません。例：claude-opus-5-5。空欄は自動判定です。",
     "reorderCatalogModel": "並べ替え：{{model}}",
     "importCatalog": "ファイルからインポート",
     "exportCatalog": "モデル設定をエクスポート",

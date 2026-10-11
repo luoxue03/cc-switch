@@ -136,6 +136,11 @@ pub(crate) fn plan_from(
     pre_bytes: Option<Vec<u8>>,
 ) -> Result<Planned, LiveWriteError> {
     let bytes = patch.apply_file(&file.path, pre_bytes.as_deref())?;
+    let bytes = if patch.is_explicit_codex_edit() {
+        bytes
+    } else {
+        crate::codex_protection::protect_auto(&file.path, pre_bytes.as_deref(), bytes)?
+    };
     Ok(Planned {
         file: file.clone(),
         pre: digest(pre_bytes.as_deref()),

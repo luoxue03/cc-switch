@@ -69,7 +69,9 @@ pub use codex::{
     should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
     strip_codex_hosted_web_search,
 };
-pub(crate) use codex::{codex_catalog_needs_routing, sanitize_codex_responses_passthrough_body};
+pub(crate) use codex::{
+    codex_capability_model, codex_catalog_needs_routing, sanitize_codex_responses_passthrough_body,
+};
 pub use gemini::GeminiAdapter;
 
 /// 供应商类型枚举

@@ -197,6 +197,36 @@ fn codex_request_model_route_mode(
     codex_provider_catalog_model_route_mode(provider, model)
 }
 
+/// Capability identity is provider-scoped; it never replaces the wire model ID.
+pub(crate) fn codex_capability_model<'a>(
+    provider: &'a Provider,
+    body: &JsonValue,
+) -> Option<&'a str> {
+    if is_codex_official_provider(provider)
+        || provider.is_github_copilot()
+        || provider.is_xai_oauth()
+    {
+        return None;
+    }
+    let model = body.get("model")?.as_str()?.trim();
+    let row = provider
+        .settings_config
+        .get("modelCatalog")?
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|row| {
+            row.get("model")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|id| id.trim() == model)
+        })?;
+    row.get("capabilityModel")
+        .or_else(|| row.get("capability_model"))?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
 pub(crate) fn codex_catalog_needs_routing(provider: &Provider) -> bool {
     provider
         .settings_config
@@ -806,10 +836,13 @@ fn infer_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
-    let model = body
-        .get("model")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
+    let model = codex_capability_model(provider, body)
+        .map(str::to_string)
+        .or_else(|| {
+            body.get("model")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })
         .or_else(|| codex_provider_upstream_model(provider))
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -1877,6 +1910,40 @@ wire_api = "anthropic"
                 ));
             }
         }
+    }
+
+    #[test]
+    fn capability_model_is_provider_scoped_case_sensitive_and_never_changes_route() {
+        let provider = create_provider(
+            json!({ "apiFormat": "openai_chat", "modelCatalog": { "models": [
+            { "model": "mcf-2", "routeMode": "anthropic", "capabilityModel": "claude-opus-5-5" },
+            { "model": "MCF-2", "routeMode": "responses", "capability_model": "gpt-5.5" },
+            { "model": "legacy", "routeMode": "chat" }
+        ] }}),
+        );
+        let body = json!({ "model": "mcf-2" });
+        assert_eq!(
+            codex_capability_model(&provider, &body),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(body["model"], "mcf-2");
+        assert!(should_convert_codex_responses_to_anthropic(
+            &provider,
+            "/responses",
+            &body
+        ));
+        assert_eq!(
+            codex_capability_model(&provider, &json!({"model":"MCF-2"})),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            codex_capability_model(&provider, &json!({"model":"legacy"})),
+            None
+        );
+        assert_eq!(
+            codex_capability_model(&create_provider(json!({})), &body),
+            None
+        );
     }
 
     #[test]

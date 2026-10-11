@@ -474,6 +474,9 @@ fn atomic_write_with_unix_mode(
     data: &[u8],
     unix_mode: Option<u32>,
 ) -> Result<(), AppError> {
+    if crate::codex_protection::is_config(path) {
+        return crate::codex_protection::legacy_write(path, data, unix_mode);
+    }
     stage_write(path, data, unix_mode, false)?.commit()
 }
 
@@ -1054,6 +1057,14 @@ pub fn copy_file(from: &Path, to: &Path) -> Result<(), AppError> {
 
 /// 删除文件
 pub fn delete_file(path: &Path) -> Result<(), AppError> {
+    if crate::codex_protection::is_config(path) {
+        let before = crate::live::engine::read_current(path)?;
+        if let Some(protected) =
+            crate::codex_protection::protect_auto(path, before.as_deref(), None)?
+        {
+            return crate::codex_protection::legacy_write(path, &protected, Some(0o600));
+        }
+    }
     if path.exists() {
         fs::remove_file(path).map_err(|e| AppError::io(path, e))?;
     }

@@ -18,6 +18,26 @@ it("preserves camelCase and legacy snake_case route modes on load and save", () 
 });
 
 describe("ProviderForm Codex catalog helpers", () => {
+  it("retains optional capability identities through load/save without altering IDs", () => {
+    const rows = [
+      {
+        model: "mcf-2",
+        routeMode: "anthropic",
+        capability_model: " claude-opus-5-5 ",
+      },
+      { model: "MCF-2" },
+    ];
+    expect(
+      normalizeCodexCatalogModelsForSave(rows.map(mapCodexCatalogModelForForm)),
+    ).toEqual([
+      {
+        model: "mcf-2",
+        routeMode: "anthropic",
+        capabilityModel: "claude-opus-5-5",
+      },
+      { model: "MCF-2" },
+    ]);
+  });
   it("normalizes catalog rows and removes empty or duplicate models", () => {
     expect(
       normalizeCodexCatalogModelsForSave([

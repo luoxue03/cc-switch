@@ -69,6 +69,13 @@ export const mapCodexCatalogModelForForm = (item: any): CodexCatalogModel => {
         : undefined;
   return {
     model: typeof item?.model === "string" ? item.model : "",
+    ...(typeof (item?.capabilityModel ?? item?.capability_model) === "string"
+      ? {
+          capabilityModel: (
+            item.capabilityModel ?? item.capability_model
+          ).trim(),
+        }
+      : {}),
     ...(normalizeCodexRouteMode(item?.routeMode ?? item?.route_mode)
       ? {
           routeMode: normalizeCodexRouteMode(

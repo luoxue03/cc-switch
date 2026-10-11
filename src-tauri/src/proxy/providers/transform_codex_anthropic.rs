@@ -46,11 +46,12 @@ pub(crate) fn effort_to_thinking_budget(effort: &str) -> Option<u64> {
     }
 }
 
-fn codex_effort_to_anthropic(effort: &str) -> Option<&'static str> {
+fn codex_effort_to_anthropic(effort: &str, model: &str) -> Option<&'static str> {
     match effort.trim().to_ascii_lowercase().as_str() {
         "minimal" | "low" => Some("low"),
         "medium" => Some("medium"),
         "high" => Some("high"),
+        "xhigh" if crate::proxy::thinking_optimizer::is_opus_5_5(model) => Some("xhigh"),
         "xhigh" | "max" | "ultra" => Some("max"),
         _ => None,
     }
@@ -230,12 +231,21 @@ pub fn responses_request_to_anthropic(
     body: Value,
     default_max_tokens: u64,
 ) -> Result<Value, ProxyError> {
+    responses_request_to_anthropic_with_capability(body, default_max_tokens, None)
+}
+
+pub(crate) fn responses_request_to_anthropic_with_capability(
+    body: Value,
+    default_max_tokens: u64,
+    capability_model: Option<&str>,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
-    let model = body
-        .get("model")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
+    let model = capability_model.unwrap_or_else(|| {
+        body.get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+    });
 
     // Pass model through (the upstream model has already been applied by the forwarder)
     if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
@@ -303,6 +313,8 @@ pub fn responses_request_to_anthropic(
     let adaptive_by_default = crate::proxy::thinking_optimizer::adaptive_thinking_is_default(model);
     let cannot_disable_thinking =
         crate::proxy::thinking_optimizer::thinking_cannot_be_disabled(model);
+    let anthropic_effort =
+        reasoning_effort.and_then(|effort| codex_effort_to_anthropic(effort, model));
 
     // max_output_tokens → max_tokens (required)
     let max_tokens = body
@@ -315,11 +327,8 @@ pub fn responses_request_to_anthropic(
         .and_then(effort_to_thinking_budget)
         .unwrap_or(0);
     let explicitly_disabled = reasoning_explicitly_disabled(reasoning_effort);
-    let adaptive_should_think = adaptive_model
-        && (adaptive_by_default
-            || reasoning_effort
-                .and_then(codex_effort_to_anthropic)
-                .is_some());
+    let adaptive_should_think =
+        adaptive_model && (adaptive_by_default || anthropic_effort.is_some());
 
     if !thinking_history_is_valid {
         if cannot_disable_thinking {
@@ -334,10 +343,10 @@ pub fn responses_request_to_anthropic(
     } else if adaptive_should_think && (!explicitly_disabled || cannot_disable_thinking) {
         thinking_enabled = true;
         result["thinking"] = json!({ "type": "adaptive" });
-        if let Some(effort) = reasoning_effort.and_then(codex_effort_to_anthropic) {
+        if let Some(effort) = anthropic_effort {
             result["output_config"] = json!({ "effort": effort });
         } else if explicitly_disabled && cannot_disable_thinking {
-            // Fable/Mythos cannot turn thinking off. `low` is the closest safe
+            // Always-thinking models cannot turn it off. `low` is the closest safe
             // representation of Codex's explicit `none` request.
             result["output_config"] = json!({ "effort": "low" });
         }
@@ -2175,6 +2184,165 @@ mod tests {
 
         let opus = responses_request_to_anthropic(request("claude-opus-4.8"), 4096).unwrap();
         assert!(opus.get("thinking").is_none());
+    }
+
+    #[test]
+    fn opus_5_5_alias_never_sends_native_budget_and_preserves_request_model() {
+        for model in [
+            "Claude-5.5-opus",
+            "claude-opus-5-5",
+            "anthropic/Claude-5.5-opus",
+        ] {
+            for (effort, expected) in [
+                (None, None),
+                (Some("low"), Some("low")),
+                (Some("medium"), Some("medium")),
+                (Some("high"), Some("high")),
+                (Some("xhigh"), Some("xhigh")),
+                (Some("max"), Some("max")),
+                (Some("ultra"), Some("max")),
+                (Some("none"), Some("low")),
+            ] {
+                let mut request = json!({
+                    "model": model,
+                    "max_output_tokens": 65536,
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "input": [{ "role": "user", "content": "hi" }],
+                    "tools": [{ "type": "function", "name": "read", "parameters": { "type": "object", "properties": {} } }]
+                });
+                if let Some(effort) = effort {
+                    request["reasoning"] = json!({ "effort": effort });
+                }
+                let output = responses_request_to_anthropic(request, 8192).unwrap();
+                assert_eq!(
+                    output["thinking"],
+                    json!({ "type": "adaptive" }),
+                    "{model}, {effort:?}: {output}"
+                );
+                assert_eq!(output["model"], model);
+                assert_eq!(output["max_tokens"], 65536);
+                assert_eq!(
+                    output
+                        .pointer("/output_config/effort")
+                        .and_then(Value::as_str),
+                    expected
+                );
+                assert_eq!(output["tools"][0]["name"], "read");
+                assert!(output.get("temperature").is_none());
+                assert!(output.get("top_p").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn opus_5_5_alias_preserves_signed_thinking_and_tool_pairing() {
+        let response = anthropic_response_to_responses(json!({
+            "id": "msg_alias",
+            "model": "Claude-5.5-opus",
+            "stop_reason": "tool_use",
+            "content": [
+                { "type": "thinking", "thinking": "", "signature": "signed-placeholder" },
+                { "type": "tool_use", "id": "call_alias", "name": "read", "input": { "path": "README.md" } }
+            ]
+        })).unwrap();
+        let mut input = vec![json!({ "role": "user", "content": "read the file" })];
+        input.extend(response["output"].as_array().unwrap().iter().cloned());
+        input.push(json!({ "type": "function_call_output", "call_id": "call_alias", "output": "file contents" }));
+        let output = responses_request_to_anthropic(
+            json!({
+                "model": "Claude-5.5-opus", "max_output_tokens": 65536,
+                "reasoning": { "effort": "high" }, "input": input
+            }),
+            8192,
+        )
+        .unwrap();
+        assert_eq!(output["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(
+            output["messages"][1]["content"][0]["signature"],
+            "signed-placeholder"
+        );
+        assert_eq!(output["messages"][1]["content"][1]["id"], "call_alias");
+        assert_eq!(
+            output["messages"][2]["content"][0]["tool_use_id"],
+            "call_alias"
+        );
+        assert_eq!(
+            output["messages"][2]["content"][0]["content"],
+            "file contents"
+        );
+    }
+
+    #[test]
+    fn opus_5_5_alias_rejects_forced_tool_choice_without_disabling_thinking() {
+        for choice in [
+            json!("required"),
+            json!({ "type": "function", "name": "read" }),
+        ] {
+            let result = responses_request_to_anthropic(
+                json!({
+                    "model": "Claude-5.5-opus", "max_output_tokens": 65536,
+                    "reasoning": { "effort": "high" },
+                    "input": [{ "role": "user", "content": "read" }],
+                    "tools": [{ "type": "function", "name": "read", "parameters": { "type": "object", "properties": {} } }],
+                    "tool_choice": choice
+                }),
+                8192,
+            );
+            assert!(
+                matches!(result, Err(ProxyError::InvalidRequest(message)) if message.contains("forced tool_choice"))
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_aliases_share_canonical_thinking_policy_without_rewriting_payloads() {
+        for (alias, canonical) in [
+            ("Claude-4.8-opus", "claude-opus-4-8"),
+            ("claude-4.8-opus", "claude-opus-4-8"),
+            ("Claude-5.1-fable", "claude-fable-5-1"),
+            ("claude-5.1-fable", "claude-fable-5-1"),
+            ("Claude-5.5-opus", "claude-opus-5-5"),
+            ("chat/vendor/Claude_5_5_Opus[1m]", "claude-opus-5-5"),
+            ("claude-4.5-sonnet", "claude-sonnet-4-5"),
+        ] {
+            for effort in ["none", "low", "medium", "high", "xhigh", "max", "ultra"] {
+                let request = |model: &str| {
+                    json!({
+                        "model": model,
+                        "reasoning": { "effort": effort },
+                        "max_output_tokens": 65536,
+                        "stream": true,
+                        "input": [{ "role": "user", "content": "keep this prompt" }],
+                        "tools": [{ "type": "function", "name": "read", "parameters": { "type": "object", "properties": {} } }]
+                    })
+                };
+                let mut aliased = responses_request_to_anthropic(request(alias), 8192).unwrap();
+                let mut official =
+                    responses_request_to_anthropic(request(canonical), 8192).unwrap();
+                assert_eq!(aliased["model"], alias);
+                assert_eq!(official["model"], canonical);
+                aliased.as_object_mut().unwrap().remove("model");
+                official.as_object_mut().unwrap().remove("model");
+                assert_eq!(aliased, official, "{alias}, {effort}");
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_model_uses_explicit_capabilities_without_rewriting_wire_id() {
+        let body = json!({ "model": "mcf-2", "reasoning": {"effort":"high"}, "input": [{"role":"user","content":"hello"}] });
+        let output = responses_request_to_anthropic_with_capability(
+            body.clone(),
+            65536,
+            Some("claude-opus-5-5"),
+        )
+        .unwrap();
+        assert_eq!(output["model"], "mcf-2");
+        assert_eq!(output["thinking"], json!({"type":"adaptive"}));
+        assert_eq!(output["output_config"]["effort"], "high");
+        let fallback = responses_request_to_anthropic(body, 65536).unwrap();
+        assert_eq!(fallback["thinking"]["type"], "enabled");
     }
 
     #[test]

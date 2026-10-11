@@ -6,6 +6,7 @@ mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
 mod codex_history_migration;
+mod codex_protection;
 mod codex_rollout_file;
 mod codex_state_db;
 mod commands;
@@ -679,6 +680,7 @@ pub fn run() {
 
             // 补完上次崩溃时写到一半的客户端文件（写前意图在 ~/.cc-switch/live-state.json），
             // 要在任何写客户端文件的启动步骤之前。
+            crate::codex_protection::initialize()?;
             crate::mode::operation::recover_on_startup(&app_state.db);
 
             // ============================================================
@@ -1431,6 +1433,10 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::read_codex_model_catalog_file,
+            commands::get_codex_protection,
+            commands::save_codex_protection,
+            commands::read_codex_protected_editor,
+            commands::save_codex_protected_editor,
             commands::export_codex_model_mapping_file,
             commands::get_settings,
             commands::save_settings,

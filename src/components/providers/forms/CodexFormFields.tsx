@@ -246,6 +246,7 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   return {
     rowId: crypto.randomUUID(),
     model: seed?.model ?? "",
+    ...(seed?.capabilityModel ? { capabilityModel: seed.capabilityModel } : {}),
     ...(seed?.routeMode ? { routeMode: seed.routeMode } : {}),
     displayName: seed?.displayName ?? "",
     contextWindow: seed?.contextWindow ?? "",
@@ -281,6 +282,7 @@ function catalogRowsMatchModels(
     return (
       row.model === (incoming.model ?? "") &&
       row.routeMode === incoming.routeMode &&
+      (row.capabilityModel ?? "") === (incoming.capabilityModel ?? "") &&
       (row.displayName ?? "") === (incoming.displayName ?? "") &&
       String(row.contextWindow ?? "") ===
         String(incoming.contextWindow ?? "") &&
@@ -1608,8 +1610,8 @@ export function CodexFormFields({
   const catalogGridColumns = (withDefault: boolean) =>
     canEditRouteMode
       ? withDefault
-        ? "md:grid-cols-[28px_36px_minmax(0,1fr)_minmax(0,1.4fr)_96px_108px_minmax(0,1fr)_36px]"
-        : "md:grid-cols-[28px_minmax(0,1fr)_minmax(0,1.4fr)_96px_108px_minmax(0,1fr)_36px]"
+        ? "md:grid-cols-[28px_36px_minmax(0,1fr)_minmax(0,1.2fr)_80px_128px_minmax(0,1.2fr)_minmax(0,1fr)_36px]"
+        : "md:grid-cols-[28px_minmax(0,1fr)_minmax(0,1.2fr)_80px_128px_minmax(0,1.2fr)_minmax(0,1fr)_36px]"
       : withDefault
         ? "md:grid-cols-[28px_36px_minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]"
         : "md:grid-cols-[28px_minmax(0,1fr)_minmax(0,1fr)_140px_minmax(0,1fr)_36px]";
@@ -1650,6 +1652,9 @@ export function CodexFormFields({
             </span>
             {canEditRouteMode && (
               <span>{t("codexConfig.catalogColumnRouteMode")}</span>
+            )}
+            {canEditRouteMode && (
+              <span>{t("codexConfig.capabilityModel")}</span>
             )}
             <span>
               {t("codexConfig.catalogColumnReasoning", {
@@ -1749,6 +1754,19 @@ export function CodexFormFields({
                     <SelectItem value="anthropic">Anthropic</SelectItem>
                   </SelectContent>
                 </Select>
+              )}
+              {canEditRouteMode && (
+                <Input
+                  value={row.capabilityModel ?? ""}
+                  aria-label={t("codexConfig.capabilityModel")}
+                  placeholder={t("codexConfig.capabilityModelAuto")}
+                  title={t("codexConfig.capabilityModelHint")}
+                  onChange={(event) =>
+                    handleUpdateCatalogRow(index, {
+                      capabilityModel: event.target.value,
+                    })
+                  }
+                />
               )}
               <ReasoningLevelsEditor
                 levels={row.reasoningLevels}

@@ -280,6 +280,7 @@ export type CodexModelRouteMode = "chat" | "responses" | "anthropic";
 
 export interface CodexCatalogModel {
   model: string;
+  capabilityModel?: string;
   routeMode?: CodexModelRouteMode;
   displayName?: string;
   contextWindow?: string | number;

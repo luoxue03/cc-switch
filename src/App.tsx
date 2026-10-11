@@ -431,6 +431,13 @@ function App() {
     };
   }, [activeApp, queryClient, refetch]);
 
+  useTauriEvent<{ message: string }>(
+    "codex-protection-warning",
+    ({ message }) => {
+      toast.warning(message, { duration: 15000 });
+    },
+  );
+
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
     try {

@@ -1,4 +1,26 @@
 {
+  "codexProtection": {
+    "title": "配置项保护",
+    "refresh": "刷新当前配置",
+    "saveRules": "保存保护选项",
+    "rulesSaved": "保护选项已保存，未改写 TOML",
+    "scope": "自动操作保留勾选项当前的内容；手动修改仍然允许。全部取消并保存后恢复自动管理。",
+    "catalogNotice": "model_catalog_json 只保护路径，不冻结它指向的模型目录文件。数组和数组表作为整体保护。",
+    "search": "筛选配置项",
+    "protect": "保护",
+    "key": "配置项",
+    "value": "当前值",
+    "absent": "未设置（保护缺失状态）",
+    "hidden": "敏感值已隐藏",
+    "clear": "全部取消",
+    "edit": "查看 / 编辑当前 TOML",
+    "manualNotice": "这里是当前文件的原始内容，可能包含密钥。明确保存可修改受保护项；外部编辑冲突时拒绝覆盖。",
+    "editor": "当前 Codex TOML",
+    "discard": "放弃编辑并关闭",
+    "discardRules": "放弃勾选更改并刷新",
+    "saveToml": "保存 TOML",
+    "tomlSaved": "TOML 已保存；客户端是否生效仍取决于当前连接和服务状态"
+  },
   "app": {
     "title": "CC Switch",
     "description": "Claude Code / Codex / Gemini CLI 全方位辅助工具"
@@ -1933,6 +1955,9 @@
     "catalogColumnContext": "上下文窗口",
     "catalogColumnReasoning": "思考等级",
     "catalogColumnRouteMode": "路由格式",
+    "capabilityModel": "能力对应模型",
+    "capabilityModelAuto": "自动识别",
+    "capabilityModelHint": "仅用于思考兼容规则，不修改实际请求模型名。例如 claude-opus-5-5；留空自动识别。",
     "reorderCatalogModel": "拖动排序：{{model}}",
     "importCatalog": "从本地导入",
     "exportCatalog": "导出模型映射",

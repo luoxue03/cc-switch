@@ -361,6 +361,22 @@ async fn write_proxy(
                 .map_err(err)?;
             let planned = codex_direct::plan(&state.db, &owner, &spec, &prepared).map_err(err)?;
             let unchanged = !force && live_now.has_contract(&planned.contract.key);
+            // A manual/external edit may have changed the live connection without
+            // changing the stored proxy contract. Validate it before reporting success.
+            if unchanged
+                && !crate::codex_protection::load_rules()
+                    .map_err(err)?
+                    .paths
+                    .is_empty()
+            {
+                crate::live::engine::plan(
+                    &crate::live::engine::LiveFile::private(
+                        crate::codex_config::get_codex_config_path(),
+                    ),
+                    planned.config(),
+                )
+                .map_err(err)?;
+            }
             target.contract = Some(planned.contract.clone());
             let pending = pending(target);
             if unchanged {
@@ -859,6 +875,7 @@ pub async fn sync_desktop_mapping_service(state: &AppState, was_mapping: bool) {
 /// 「关闭本地路由」：全部退回直连，再停掉代理服务。
 pub async fn exit_all(state: &AppState) -> Result<(), String> {
     let mut errors = Vec::new();
+    let codex_dependency = crate::codex_protection::proxy_dependency_warning();
     for app in PROXY_APPS {
         let result = match lock_settled(state, &app).await {
             Ok(_guard) => exit_locked(state, &app, false),
@@ -871,10 +888,21 @@ pub async fn exit_all(state: &AppState) -> Result<(), String> {
     if state.proxy_service.is_running().await {
         if let Err(error) = state.proxy_service.stop().await {
             log::warn!("停止代理服务失败: {error}");
+            errors.push(format!("停止代理服务失败: {error}"));
         }
     }
     if let Err(error) = state.db.clear_all_provider_health().await {
         log::warn!("重置健康状态失败: {error}");
+    }
+    if let Some(warning) = crate::codex_protection::proxy_dependency_warning()
+        .or(codex_dependency.filter(|_| !errors.is_empty()))
+    {
+        let status = if state.proxy_service.is_running().await {
+            "代理服务仍在运行，退出未完成 / Proxy is still running"
+        } else {
+            "代理服务已停止 / Proxy stopped"
+        };
+        errors.push(format!("{status}: {warning}"));
     }
     if errors.is_empty() {
         Ok(())
@@ -3828,6 +3856,73 @@ model_provider = "c"
             "{back}"
         );
         assert_eq!(codex_user_parts(&back).len(), 6, "{back}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_protection_keeps_client_connection_while_switching_upstreams() {
+        let _home = Home::new();
+        set_preservation(true);
+        seed_codex(CODEX_USER_LIVE, None);
+        let [a, b] = codex_a_b();
+        let mut c = codex_row("c", "https://c.example/v1", "");
+        c.settings_config["config"] = json!(c.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .replace("gpt-c", "gpt-b"));
+        let state = state_with(AppType::Codex, &[a, b, c], "b").await;
+        enter(&state, &AppType::Codex, false).await.unwrap();
+        let mut doc: toml_edit::DocumentMut = codex_text().parse().unwrap();
+        let proxy_url = doc["model_providers"]["custom"]["base_url"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        doc["model_provider"] = toml_edit::value("openai");
+        doc["openai_base_url"] = toml_edit::value(&proxy_url);
+        fs::write(codex_config_path(), doc.to_string()).unwrap();
+        crate::codex_protection::initialize().unwrap();
+
+        // Same contract: only the upstream target changes.
+        let before = codex_text();
+        ProviderService::switch(&state, AppType::Codex, "c").unwrap();
+        assert_eq!(codex_text(), before);
+        assert_eq!(in_use(&state, &AppType::Codex).as_deref(), Some("c"));
+        // Different contract: the unprotected model is still managed.
+        ProviderService::switch(&state, AppType::Codex, "a").unwrap();
+        assert_eq!(codex_doc()["model"].as_str(), Some("gpt-a"));
+        assert_eq!(codex_doc()["model_provider"].as_str(), Some("openai"));
+        assert_eq!(
+            codex_doc()["openai_base_url"].as_str(),
+            Some(proxy_url.as_str())
+        );
+
+        let snapshot = crate::codex_protection::snapshot().unwrap();
+        let mut paths = snapshot.protected_paths;
+        paths.push(vec!["model".into()]);
+        crate::codex_protection::save_rules(paths, &snapshot.rules_revision).unwrap();
+        let mut doc: toml_edit::DocumentMut = codex_text().parse().unwrap();
+        doc["model"] = toml_edit::value("externally-chosen-model");
+        fs::write(codex_config_path(), doc.to_string()).unwrap();
+        ProviderService::switch(&state, AppType::Codex, "b").unwrap();
+        assert_eq!(
+            codex_doc()["model"].as_str(),
+            Some("externally-chosen-model")
+        );
+
+        // A protected connection changed externally cannot silently switch the target.
+        let mut doc: toml_edit::DocumentMut = codex_text().parse().unwrap();
+        doc["openai_base_url"] = toml_edit::value("https://manual.example/v1");
+        fs::write(codex_config_path(), doc.to_string()).unwrap();
+        assert!(ProviderService::switch(&state, AppType::Codex, "c").is_err());
+        assert_eq!(in_use(&state, &AppType::Codex).as_deref(), Some("b"));
+        doc["openai_base_url"] = toml_edit::value(&proxy_url);
+        fs::write(codex_config_path(), doc.to_string()).unwrap();
+        let before = codex_text();
+        assert!(exit(&state, &AppType::Codex).await.is_err());
+        assert_eq!(codex_text(), before);
+        assert!(crate::codex_protection::proxy_dependency_warning().is_some());
+        state.proxy_service.stop().await.unwrap();
+        assert_eq!(codex_text(), before);
     }
 
     #[tokio::test]

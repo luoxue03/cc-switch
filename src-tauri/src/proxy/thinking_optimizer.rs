@@ -1,7 +1,9 @@
 //! Thinking 优化器
 
 use super::types::OptimizerConfig;
+use regex::Regex;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 /// 根据模型类型自动优化 thinking 配置
 ///
@@ -87,7 +89,7 @@ pub(crate) fn uses_adaptive_thinking(model: &str) -> bool {
         "sonnet-4-6",
     ]
     .iter()
-    .any(|needle| normalized.contains(needle))
+    .any(|needle| matches_model_family(&normalized, needle))
 }
 
 /// Models where omitting `thinking` still leaves adaptive thinking enabled
@@ -103,7 +105,7 @@ pub(crate) fn adaptive_thinking_is_default(model: &str) -> bool {
         "sonnet-5",
     ]
     .iter()
-    .any(|needle| normalized.contains(needle))
+    .any(|needle| matches_model_family(&normalized, needle))
 }
 
 /// Models that reject `thinking: {"type":"disabled"}`.
@@ -111,11 +113,39 @@ pub(crate) fn thinking_cannot_be_disabled(model: &str) -> bool {
     let normalized = normalize_model_name(model);
     ["fable-5", "mythos-5"]
         .iter()
-        .any(|needle| normalized.contains(needle))
+        .any(|needle| matches_model_family(&normalized, needle))
+        || matches_model_family(&normalized, "opus-5-5")
+}
+
+/// Opus 5.5 is always adaptive and accepts a distinct xhigh effort level.
+pub(crate) fn is_opus_5_5(model: &str) -> bool {
+    let normalized = normalize_model_name(model);
+    matches_model_family(&normalized, "opus-5-5")
+}
+
+fn matches_model_family(model: &str, family: &str) -> bool {
+    model.match_indices(family).any(|(start, _)| {
+        let end = start + family.len();
+        let left_boundary = start == 0 || !model.as_bytes()[start - 1].is_ascii_alphanumeric();
+        let right_boundary = end == model.len() || !model.as_bytes()[end].is_ascii_alphanumeric();
+        left_boundary && right_boundary
+    })
 }
 
 fn normalize_model_name(model: &str) -> String {
-    model.trim().to_ascii_lowercase().replace(['.', '_'], "-")
+    static VERSION_FIRST_CLAUDE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?P<prefix>^|[^a-z0-9])claude-(?P<version>[0-9]+(?:-[0-9]+)*)-(?P<family>opus|sonnet|fable|mythos|haiku)(?P<suffix>$|[^a-z0-9])")
+            .expect("valid Claude alias regex")
+    });
+    // Prefixes such as chat/, any/, or vendor/account/ select gateway routes,
+    // not model capabilities. Keep the complete original ID at every call site.
+    let model = model.trim().rsplit('/').next().unwrap_or(model);
+    let normalized = model.to_ascii_lowercase().replace(['.', '_'], "-");
+    // Gateway aliases may use Claude-5.5-opus instead of claude-opus-5-5.
+    // Normalize for capability detection only; never rewrite the upstream model ID.
+    VERSION_FIRST_CLAUDE
+        .replace_all(&normalized, "${prefix}claude-${family}-${version}${suffix}")
+        .into_owned()
 }
 
 /// 追加 beta 标识到 anthropic_beta 数组（去重）
@@ -201,6 +231,128 @@ mod tests {
         }
         assert!(thinking_cannot_be_disabled("claude-fable-5"));
         assert!(!thinking_cannot_be_disabled("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn version_first_claude_aliases_match_canonical_thinking_policy() {
+        for (alias, canonical) in [
+            ("Claude-5.5-opus", "claude-opus-5-5"),
+            ("anthropic/Claude-5.5-opus[1m]", "claude-opus-5-5[1m]"),
+            ("Claude_5_5_Opus", "claude-opus-5-5"),
+            ("Claude-4.8-opus", "claude-opus-4-8"),
+            ("Claude-4.5-opus", "claude-opus-4-5"),
+            ("Claude-4.6-sonnet", "claude-sonnet-4-6"),
+            ("Claude-5.1-fable", "claude-fable-5-1"),
+            ("Claude-5.1-mythos", "claude-mythos-5-1"),
+            ("chat/vendor/Claude-5.5-opus", "claude-opus-5-5"),
+            ("anthropic/claude-opus-4.8", "claude-opus-4-8"),
+            ("Claude-5-5-opus-thinking", "claude-opus-5-5-thinking"),
+            ("Vendor/Claude_4_8_Opus[1M]", "claude-opus-4-8[1m]"),
+        ] {
+            assert_eq!(
+                uses_adaptive_thinking(alias),
+                uses_adaptive_thinking(canonical),
+                "{alias}"
+            );
+            assert_eq!(
+                adaptive_thinking_is_default(alias),
+                adaptive_thinking_is_default(canonical),
+                "{alias}"
+            );
+            assert_eq!(
+                thinking_cannot_be_disabled(alias),
+                thinking_cannot_be_disabled(canonical),
+                "{alias}"
+            );
+        }
+        for model in [
+            "deepseek-v4-pro",
+            "GPT-6-Astra",
+            "myclaude-5.5-opus",
+            "claude-5.5-opuslike",
+            "claude-opus-5x",
+            "claude-opus-4-60",
+            "claude-sonnet-50",
+            "claude-opus-5-5/mcf-2",
+            "claude-fable-5/chat/deepseek-v4-pro",
+        ] {
+            assert!(!uses_adaptive_thinking(model), "{model}");
+            assert!(!adaptive_thinking_is_default(model), "{model}");
+            assert!(!thinking_cannot_be_disabled(model), "{model}");
+        }
+    }
+
+    #[test]
+    fn configured_gateway_names_only_enable_known_claude_capabilities() {
+        for (model, adaptive, default_on, always_on) in [
+            ("Claude-4.8-opus", true, false, false),
+            ("claude-4.8-opus", true, false, false),
+            ("Claude-5.1-fable", true, true, true),
+            ("claude-5.1-fable", true, true, true),
+            ("Claude-5.5-opus", true, true, true),
+            ("GPT-6-Astra", false, false, false),
+            ("chat/deepseek-v4-pro-0813", false, false, false),
+            ("chat/deepseek-v4.1-flash", false, false, false),
+            ("chat/ZHIPU/GLM-5.3", false, false, false),
+            ("specxmaster/gpt-5.6-terra", false, false, false),
+            ("specxmaster/gpt-5.6-luna", false, false, false),
+            ("specxmaster/gpt-5.6-sol", false, false, false),
+            ("GPT-5.6-sol", false, false, false),
+            ("gpt-5.6-sol", false, false, false),
+            ("any/gpt-5.6-sol", false, false, false),
+            ("chat/kimi/kimi-k3", false, false, false),
+            ("codex-auto-review", false, false, false),
+            ("gpt-5.4-mini", false, false, false),
+            ("mog-10-a", false, false, false),
+            ("GPT-6-Astra-2", false, false, false),
+            ("mcf-2", false, false, false),
+        ] {
+            assert_eq!(uses_adaptive_thinking(model), adaptive, "{model}");
+            assert_eq!(adaptive_thinking_is_default(model), default_on, "{model}");
+            assert_eq!(thinking_cannot_be_disabled(model), always_on, "{model}");
+        }
+    }
+
+    #[test]
+    fn thinking_optimizer_keeps_gateway_alias_and_output_limit_unchanged() {
+        for model in [
+            "Claude-4.8-opus",
+            "claude-4.8-opus",
+            "Claude-5.1-fable",
+            "Claude-5.5-opus",
+        ] {
+            let mut body = json!({
+                "model": model,
+                "max_tokens": 65536,
+                "thinking": { "type": "enabled", "budget_tokens": 8192 },
+                "messages": [{ "role": "user", "content": "hello" }]
+            });
+            let messages = body["messages"].clone();
+            optimize(&mut body, &enabled_config());
+            assert_eq!(body["model"], model);
+            assert_eq!(body["max_tokens"], 65536);
+            assert_eq!(body["messages"], messages);
+            assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+        }
+    }
+
+    #[test]
+    fn opus_5_5_requires_thinking_but_older_opus_keeps_existing_policy() {
+        for model in [
+            "Claude-5.5-opus",
+            "claude-opus-5-5",
+            "anthropic.claude-opus-5-5",
+        ] {
+            assert!(thinking_cannot_be_disabled(model), "{model}");
+        }
+        for model in [
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "Claude-4.8-opus",
+            "claude-opus-5-50",
+        ] {
+            assert!(!thinking_cannot_be_disabled(model), "{model}");
+        }
     }
 
     #[test]

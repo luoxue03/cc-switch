@@ -603,6 +603,7 @@ pub fn row_catalog_pointer(top: &[(String, TomlValue)]) -> Option<&(String, Toml
 
 impl CodexConfigPatch {
     pub fn apply_to(&self, path: &Path, doc: &mut DocumentMut) -> Result<(), LiveWriteError> {
+        let before = doc.clone();
         let target_top: Vec<&str> = self
             .top
             .iter()
@@ -700,7 +701,11 @@ impl CodexConfigPatch {
             put_value(root, MODEL_CATALOG_JSON, &TomlValue::from(CATALOG_FILENAME));
         }
 
-        check_effective_route(doc, selector)
+        if crate::codex_protection::protect_projection(path, &before, doc)? {
+            Ok(())
+        } else {
+            check_effective_route(doc, selector)
+        }
     }
 
     fn write_route(&self, path: &Path, doc: &mut DocumentMut) -> Result<(), LiveWriteError> {

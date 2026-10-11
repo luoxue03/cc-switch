@@ -195,6 +195,9 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
+      ...(item.capabilityModel?.trim()
+        ? { capabilityModel: item.capabilityModel.trim() }
+        : {}),
       ...(normalizeCodexRouteMode(item.routeMode)
         ? { routeMode: normalizeCodexRouteMode(item.routeMode) }
         : {}),

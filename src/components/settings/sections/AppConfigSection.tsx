@@ -11,6 +11,7 @@ import {
   type DirectoryAppId,
 } from "@/components/settings/DirectorySettings";
 import { CodexAuthSettings } from "@/components/settings/CodexAuthSettings";
+import { CodexConfigProtection } from "@/components/settings/CodexConfigProtection";
 import { APP_DISPLAY_NAME, AppGlyph } from "@/components/shell/AppGlyph";
 import {
   SettingsBlock,
@@ -184,6 +185,9 @@ export function AppConfigSection({
             )}
             {directoryRow(app)}
           </SettingsCard>
+          {app === "codex" && (
+            <CodexConfigProtection configDir={savedSettings?.codexConfigDir} />
+          )}
         </SettingsBlock>
       ))}
     </>

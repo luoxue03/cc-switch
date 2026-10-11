@@ -271,6 +271,22 @@ describe("ProviderForm Stack layout (Claude Code)", () => {
 });
 
 describe("ProviderForm Stack layout (Codex)", () => {
+  it("edits capability identity independently of model ID and routing", async () => {
+    const submit = vi.fn();
+    renderForm("codex", submit, {
+      codexCatalog: [{ model: "mcf-2", routeMode: "anthropic" }],
+    });
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "codexConfig.capabilityModel" }),
+      { target: { value: "claude-opus-5-5" } },
+    );
+    const { settings } = await save(submit);
+    expect(settings.modelCatalog.models[0]).toMatchObject({
+      model: "mcf-2",
+      routeMode: "anthropic",
+      capabilityModel: "claude-opus-5-5",
+    });
+  });
   beforeEach(() => {
     settingsState.enableStackMode = true;
   });

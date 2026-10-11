@@ -1,4 +1,26 @@
 {
+  "codexProtection": {
+    "title": "Configuration Protection",
+    "refresh": "Refresh current configuration",
+    "saveRules": "Save protection options",
+    "rulesSaved": "Protection saved. TOML was not modified.",
+    "scope": "Automatic operations preserve the current contents of selected fields. Manual edits remain allowed. Clear and save to restore automatic management.",
+    "catalogNotice": "model_catalog_json protects the path only, not the referenced catalog file. Arrays and arrays of tables are protected as a whole.",
+    "search": "Filter configuration fields",
+    "protect": "Protect",
+    "key": "Field",
+    "value": "Current value",
+    "absent": "Not set (absence protected)",
+    "hidden": "Sensitive value hidden",
+    "clear": "Clear all",
+    "edit": "View / edit current TOML",
+    "manualNotice": "This is the raw current file and may contain credentials. Explicit saving can edit protected fields; conflicting external edits are not overwritten.",
+    "editor": "Current Codex TOML",
+    "discard": "Discard edits and close",
+    "discardRules": "Discard selections and refresh",
+    "saveToml": "Save TOML",
+    "tomlSaved": "TOML saved. Client connectivity depends on the configured endpoint and running services."
+  },
   "app": {
     "title": "CC Switch",
     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
@@ -1933,6 +1955,9 @@
     "catalogColumnContext": "Context Window",
     "catalogColumnReasoning": "Reasoning Levels",
     "catalogColumnRouteMode": "Route Format",
+    "capabilityModel": "Capability Model",
+    "capabilityModelAuto": "Auto-detect",
+    "capabilityModelHint": "Controls thinking compatibility only; the wire model ID is unchanged. Example: claude-opus-5-5. Empty means auto-detect.",
     "reorderCatalogModel": "Reorder: {{model}}",
     "importCatalog": "Import from File",
     "exportCatalog": "Export Model Mapping",
