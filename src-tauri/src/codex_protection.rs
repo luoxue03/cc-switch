@@ -343,7 +343,8 @@ pub(crate) fn legacy_write(path: &Path, data: &[u8], mode: Option<u32>) -> Resul
     staged.commit()
 }
 
-/// Used by the projection before its legacy route validation (also covers editor previews).
+/// Used by automatic write projections before route validation; editor previews
+/// render independently and never restore protected values into provider drafts.
 pub(crate) fn protect_projection(
     path: &Path,
     before: &DocumentMut,

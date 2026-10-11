@@ -6,12 +6,12 @@ import { providersApi, type AppId } from "@/lib/api";
 import type { ProviderMeta } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
-/** 编辑器投影读不了客户端配置文件（比如手改坏了）：编辑器退回显示保存的内容。 */
+/** 读取或生成预览失败：编辑器退回显示保存的内容，原因不一定是文件读取失败。 */
 export function toastEditorViewFailed(t: TFunction, error: unknown) {
   toast.error(
     t("provider.editorViewFailed", {
       defaultValue:
-        "无法读取客户端配置文件，下面显示的是保存的供应商配置：{{error}}",
+        "无法生成供应商配置预览，下面显示的是已保存的供应商配置：{{error}}",
       error: extractErrorMessage(error),
     }),
   );

@@ -67,22 +67,26 @@ fn reasoning_explicitly_disabled(effort: Option<&str>) -> bool {
     )
 }
 
+fn has_thinking_replay_data(block: &Value) -> bool {
+    match block.get("type").and_then(|value| value.as_str()) {
+        Some("thinking") => block
+            .get("signature")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty()),
+        Some("redacted_thinking") => block
+            .get("data")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty()),
+        _ => false,
+    }
+}
+
 /// Preserve an Anthropic signed thinking/redacted-thinking block inside the opaque
 /// Responses `reasoning.encrypted_content` field so Codex replays it on the next
 /// tool-result request. The prefix keeps unrelated providers' ciphertext isolated.
 pub(crate) fn encode_anthropic_thinking_block(block: &Value) -> Option<String> {
-    match block.get("type").and_then(|value| value.as_str()) {
-        Some("thinking")
-            if block
-                .get("signature")
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty()) => {}
-        Some("redacted_thinking")
-            if block
-                .get("data")
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty()) => {}
-        _ => return None,
+    if !has_thinking_replay_data(block) {
+        return None;
     }
     let bytes = serde_json::to_vec(block).ok()?;
     Some(format!(
@@ -303,13 +307,13 @@ pub(crate) fn responses_request_to_anthropic_with_capability(
             "cannot convert Codex request: empty messages".to_string(),
         ));
     }
-    let thinking_history_is_valid = trailing_turn_supports_thinking(&messages);
+    let adaptive_model = crate::proxy::thinking_optimizer::uses_adaptive_thinking(model);
+    let thinking_history_is_valid = trailing_turn_supports_thinking(&messages, adaptive_model);
     result["messages"] = json!(messages);
 
     let reasoning_effort = body
         .pointer("/reasoning/effort")
         .and_then(|value| value.as_str());
-    let adaptive_model = crate::proxy::thinking_optimizer::uses_adaptive_thinking(model);
     let adaptive_by_default = crate::proxy::thinking_optimizer::adaptive_thinking_is_default(model);
     let cannot_disable_thinking =
         crate::proxy::thinking_optimizer::thinking_cannot_be_disabled(model);
@@ -333,7 +337,7 @@ pub(crate) fn responses_request_to_anthropic_with_capability(
     if !thinking_history_is_valid {
         if cannot_disable_thinking {
             return Err(ProxyError::InvalidRequest(
-                "Anthropic model requires thinking, but the tool history has no signed thinking block to replay"
+                "Anthropic model requires thinking, but the trailing history is not a user turn or a complete tool-result continuation (assistant prefill is unsupported)"
                     .to_string(),
             ));
         }
@@ -661,7 +665,9 @@ fn convert_input_to_messages(
                     .and_then(|value| value.as_str())
                     .and_then(decode_anthropic_thinking_block)
                 {
-                    push_assistant_thinking_block(&mut messages, block);
+                    // Keep the position of each signed block beside the tool/text
+                    // blocks it accompanied; never hoist it to another position.
+                    push_block(&mut messages, "assistant", block);
                 }
             }
             // Codex 远程压缩：触发条目换成压缩提示词，历史里的压缩条目换成摘要正文，
@@ -1040,66 +1046,63 @@ fn message_has_content(message: &Value) -> bool {
         .unwrap_or(true)
 }
 
-/// A fresh user prompt can start a new thinking turn. A tool-result continuation
-/// may keep thinking enabled only when the preceding assistant turn includes the
-/// signed thinking/redacted-thinking block that Anthropic requires callers to replay.
-fn trailing_turn_supports_thinking(messages: &[Value]) -> bool {
-    let Some(last) = messages.last() else {
-        return false;
-    };
-    if last.get("role").and_then(Value::as_str) != Some("user") {
-        return false;
-    }
-    let mut tool_result_ids = Vec::new();
-    if let Some(blocks) = last.get("content").and_then(Value::as_array) {
-        for block in blocks {
-            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                continue;
-            }
-            let Some(id) = block
-                .get("tool_use_id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-            else {
-                return false;
-            };
-            tool_result_ids.push(id);
+/// Adaptive thinking may emit a tool call without a thinking block. Manual
+/// thinking needs replay data somewhere in the same uninterrupted tool-use loop,
+/// not necessarily in its last response. This only checks structure, not signatures.
+fn trailing_turn_supports_thinking(messages: &[Value], adaptive: bool) -> bool {
+    let mut end = messages.len();
+    while end > 0 {
+        let user = &messages[end - 1];
+        if user.get("role").and_then(Value::as_str) != Some("user") {
+            return false;
         }
+        let result_ids = message_block_ids(user, "tool_result", "tool_use_id");
+        if result_ids.is_empty() {
+            // A fresh final user prompt can enable thinking. An earlier prompt
+            // is a turn boundary and cannot lend thinking to a later tool loop.
+            return end == messages.len();
+        }
+        let only_tool_results =
+            user.get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks.iter().all(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    })
+                });
+        if end != messages.len() && !only_tool_results {
+            return false;
+        }
+        let Some(assistant) = end.checked_sub(2).and_then(|i| messages.get(i)) else {
+            return false;
+        };
+        if assistant.get("role").and_then(Value::as_str) != Some("assistant") {
+            return false;
+        }
+        let call_ids = message_block_ids(assistant, "tool_use", "id");
+        let calls: HashSet<_> = call_ids.iter().copied().collect();
+        let results: HashSet<_> = result_ids.iter().copied().collect();
+        if calls.contains("")
+            || calls.len() != call_ids.len()
+            || results.len() != result_ids.len()
+            || calls != results
+        {
+            return false;
+        }
+        if adaptive
+            || assistant
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| blocks.iter().any(has_thinking_replay_data))
+        {
+            return true;
+        }
+        if !only_tool_results {
+            return false;
+        }
+        end -= 2;
     }
-    if tool_result_ids.is_empty() {
-        return true;
-    }
-
-    // A tool-result turn answers the immediately preceding assistant tool-use turn.
-    // Looking any farther back can pick up an unrelated signed thinking block and
-    // incorrectly re-enable thinking for an unsigned tool call.
-    let Some(paired_assistant) = messages.get(messages.len().saturating_sub(2)) else {
-        return false;
-    };
-    if paired_assistant.get("role").and_then(Value::as_str) != Some("assistant") {
-        return false;
-    }
-    let Some(blocks) = paired_assistant.get("content").and_then(Value::as_array) else {
-        return false;
-    };
-    let has_signed_thinking = blocks.iter().any(|block| {
-        matches!(
-            block.get("type").and_then(Value::as_str),
-            Some("thinking" | "redacted_thinking")
-        )
-    });
-    if !has_signed_thinking {
-        return false;
-    }
-
-    let paired_tool_use_ids: HashSet<&str> = blocks
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .filter_map(|block| block.get("id").and_then(Value::as_str))
-        .collect();
-    tool_result_ids
-        .iter()
-        .all(|id| paired_tool_use_ids.contains(id))
+    false
 }
 
 /// Removes whitespace-only assistant prefills and trims trailing whitespace from a
@@ -1188,27 +1191,6 @@ fn push_tool_result_block(messages: &mut Vec<Value>, block: Value) {
         "role": "user",
         "content": [block]
     }));
-}
-
-fn push_assistant_thinking_block(messages: &mut Vec<Value>, block: Value) {
-    if let Some(last) = messages.last_mut() {
-        if last.get("role").and_then(Value::as_str) == Some("assistant") {
-            if let Some(content) = last.get_mut("content").and_then(Value::as_array_mut) {
-                let index = content
-                    .iter()
-                    .take_while(|item| {
-                        matches!(
-                            item.get("type").and_then(Value::as_str),
-                            Some("thinking" | "redacted_thinking")
-                        )
-                    })
-                    .count();
-                content.insert(index, block);
-                return;
-            }
-        }
-    }
-    push_block(messages, "assistant", block);
 }
 
 /// Responses' input_image → Anthropic image block.
@@ -2382,6 +2364,111 @@ mod tests {
         assert_eq!(result["temperature"], 0.5);
     }
 
+    fn signed_tool_loop_input() -> Vec<Value> {
+        let reasoning = responses_reasoning_item_from_anthropic_block(
+            "rs_loop",
+            &json!({
+                "type": "thinking", "thinking": "", "signature": "test-signature"
+            }),
+        )
+        .unwrap();
+        vec![
+            json!({"role":"user","content":"Run the test tools"}),
+            reasoning,
+            json!({"type":"function_call","call_id":"c1","name":"first","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"c1","output":"first result"}),
+            // Some continuations contain only tool_use, as in AxonHub request 34262.
+            json!({"type":"function_call","call_id":"c2","name":"second","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"c2","output":"second result"}),
+            json!({"type":"function_call","call_id":"c3","name":"third","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"c3","output":"third result"}),
+        ]
+    }
+
+    #[test]
+    fn continuous_tool_loop_preserves_thinking_configuration_and_history() {
+        for model in [
+            "Claude-5.5-opus",
+            "claude-fable-5-1",
+            "claude-opus-4-8",
+            "claude-sonnet-4-5",
+        ] {
+            let input = signed_tool_loop_input();
+            let expected = convert_input_to_messages(&input, &CodexToolContext::default()).unwrap();
+            let result = responses_request_to_anthropic(json!({
+                "model":model,"max_output_tokens":20000,"reasoning":{"effort":"high"},"input":input
+            }), 20000).unwrap();
+            assert_eq!(result["messages"], json!(expected));
+            assert_eq!(result["model"], model);
+            if model == "claude-sonnet-4-5" {
+                assert_eq!(result["thinking"]["type"], "enabled");
+            } else {
+                assert_eq!(result["thinking"]["type"], "adaptive");
+                assert_eq!(result["output_config"]["effort"], "high");
+                assert!(result["thinking"].get("budget_tokens").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_tool_only_response_can_be_replayed_without_inventing_thinking() {
+        for model in ["Claude-5.5-opus", "claude-sonnet-5", "claude-opus-4-8"] {
+            let input = vec![
+                json!({"role":"user","content":"A test tool returned its value"}),
+                json!({"type":"function_call","call_id":"c1","name":"probe","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":"c1","output":"2"}),
+            ];
+            let expected = convert_input_to_messages(&input, &CodexToolContext::default()).unwrap();
+            let result = responses_request_to_anthropic(json!({
+                "model":model,"max_output_tokens":20000,"reasoning":{"effort":"high"},"input":input
+            }), 20000).unwrap();
+            assert_eq!(result["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(result["output_config"]["effort"], "high");
+            assert_eq!(result["messages"], json!(expected));
+            assert_eq!(
+                result["messages"][1]["content"].as_array().unwrap().len(),
+                1
+            );
+        }
+        let mut input = signed_tool_loop_input();
+        input.remove(1);
+        let result = responses_request_to_anthropic_with_capability(
+            json!({
+                "model":"mcf-2","reasoning":{"effort":"high"},"input":input
+            }),
+            20000,
+            Some("claude-opus-5-5"),
+        )
+        .unwrap();
+        assert_eq!(result["thinking"]["type"], "adaptive");
+        assert_eq!(result["model"], "mcf-2");
+    }
+
+    #[test]
+    fn thinking_and_progress_blocks_retain_original_positions_through_tool_replay() {
+        let blocks = json!([
+            {"type":"thinking","thinking":"","signature":"reasoning-signature"},
+            {"type":"text","text":"Starting the tools"},
+            {"type":"tool_use","id":"c1","name":"first","input":{}},
+            {"type":"thinking","thinking":"Starting second tool","signature":"progress-signature"},
+            {"type":"redacted_thinking","data":"redacted-test-data"},
+            {"type":"tool_use","id":"c2","name":"second","input":{}}
+        ]);
+        let response = anthropic_response_to_responses(json!({"id":"msg_loop","model":"Claude-5.5-opus","content":blocks,"stop_reason":"tool_use"})).unwrap();
+        let mut input = vec![json!({"role":"user","content":"Run tools"})];
+        input.extend(response["output"].as_array().unwrap().iter().cloned());
+        input.extend([
+            json!({"type":"function_call_output","call_id":"c1","output":"one"}),
+            json!({"type":"function_call_output","call_id":"c2","output":"two"}),
+        ]);
+        let result = responses_request_to_anthropic(
+            json!({"model":"Claude-5.5-opus","reasoning":{"effort":"high"},"input":input}),
+            20000,
+        )
+        .unwrap();
+        assert_eq!(result["messages"][1]["content"], blocks);
+    }
+
     #[test]
     fn test_older_signed_turn_does_not_enable_thinking_for_unsigned_tool_call() {
         let encrypted = encode_anthropic_thinking_block(&json!({
@@ -2391,7 +2478,7 @@ mod tests {
         }))
         .unwrap();
         let input = json!({
-            "model": "claude-sonnet-5",
+            "model": "claude-sonnet-4-5",
             "max_output_tokens": 4096,
             "reasoning": { "effort": "high" },
             "input": [
@@ -2406,7 +2493,7 @@ mod tests {
 
         let result = responses_request_to_anthropic(input, 4096).unwrap();
 
-        assert_eq!(result["thinking"]["type"], "disabled");
+        assert!(result.get("thinking").is_none());
         let messages = result["messages"].as_array().unwrap();
         let paired_assistant = &messages[messages.len() - 2];
         assert_eq!(paired_assistant["role"], "assistant");
@@ -2426,7 +2513,10 @@ mod tests {
                 {"type": "tool_result", "tool_use_id": "c2", "content": "two"}
             ]}
         ]);
-        assert!(trailing_turn_supports_thinking(paired.as_array().unwrap()));
+        assert!(trailing_turn_supports_thinking(
+            paired.as_array().unwrap(),
+            false
+        ));
 
         let mismatched = json!([
             paired[0].clone(),
@@ -2436,8 +2526,143 @@ mod tests {
             ]}
         ]);
         assert!(!trailing_turn_supports_thinking(
-            mismatched.as_array().unwrap()
+            mismatched.as_array().unwrap(),
+            false
         ));
+        for adaptive in [false, true] {
+            for results in [
+                json!([{"type":"tool_result","tool_use_id":"c1","content":"one"}]),
+                json!([{"type":"tool_result","tool_use_id":"c1","content":"one"},{"type":"tool_result","tool_use_id":"c1","content":"duplicate"}]),
+                json!([{"type":"tool_result","tool_use_id":"","content":"empty"}]),
+            ] {
+                let pair = vec![paired[0].clone(), json!({"role":"user","content":results})];
+                assert!(!trailing_turn_supports_thinking(&pair, adaptive));
+            }
+            let mut duplicate_calls = paired.as_array().unwrap().clone();
+            duplicate_calls[0]["content"][2]["id"] = json!("c1");
+            assert!(!trailing_turn_supports_thinking(&duplicate_calls, adaptive));
+        }
+    }
+
+    #[test]
+    fn manual_thinking_loop_stops_at_real_user_messages_and_completed_answers() {
+        let input = signed_tool_loop_input();
+        let messages = convert_input_to_messages(&input, &CodexToolContext::default()).unwrap();
+        assert!(trailing_turn_supports_thinking(&messages, false));
+        for boundary in [
+            json!({"type":"text","text":"New instructions"}),
+            json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"test"}}),
+        ] {
+            let mut interrupted = messages.clone();
+            interrupted[2]["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(boundary);
+            assert!(!trailing_turn_supports_thinking(&interrupted, false));
+        }
+        let mut interrupted = messages.clone();
+        interrupted[3] = json!({"role":"assistant","content":[{"type":"text","text":"Done"}]});
+        assert!(!trailing_turn_supports_thinking(&interrupted, false));
+
+        let mut malformed = messages.clone();
+        malformed[1]["content"][0]["signature"] = json!("");
+        assert!(!trailing_turn_supports_thinking(&malformed, false));
+        let mut redacted = messages;
+        redacted[1]["content"][0] =
+            json!({"type":"redacted_thinking","data":"original-redacted-data"});
+        assert!(trailing_turn_supports_thinking(&redacted, false));
+    }
+
+    #[test]
+    fn adaptive_history_keeps_valid_blocks_without_accepting_foreign_reasoning_as_signatures() {
+        let mut input = signed_tool_loop_input();
+        input[1]["encrypted_content"] = json!("foreign-or-malformed-reasoning");
+        for model in ["Claude-5.5-opus", "claude-sonnet-4-5"] {
+            let body = json!({"model":model,"input":input,"reasoning":{"effort":"high"},"max_output_tokens":20000});
+            let result = responses_request_to_anthropic(body.clone(), 20000).unwrap();
+            let again = responses_request_to_anthropic(body, 20000).unwrap();
+            assert_eq!(
+                canonical_json_string(&result),
+                canonical_json_string(&again)
+            );
+            assert!(result["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(
+                    |m| m["content"].as_array().unwrap().iter().all(|b| !matches!(
+                        b["type"].as_str(),
+                        Some("thinking" | "redacted_thinking")
+                    ))
+                ));
+            if model == "Claude-5.5-opus" {
+                assert_eq!(result["thinking"]["type"], "adaptive");
+            } else {
+                assert!(result.get("thinking").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_unsigned_history_retains_custom_and_search_tools() {
+        let result = responses_request_to_anthropic(json!({
+            "model":"Claude-5.5-opus", "reasoning":{"effort":"high"},
+            "input":[
+                {"role":"user","content":"Run the tools"},
+                {"type":"custom_tool_call","call_id":"custom1","name":"patch","input":"test patch"},
+                {"type":"tool_search_call","call_id":"search1","arguments":{"query":"test"}},
+                {"type":"custom_tool_call_output","call_id":"custom1","output":"patch result"},
+                {"type":"tool_search_output","call_id":"search1","output":"search result"}
+            ]
+        }),20000).unwrap();
+        assert_eq!(result["thinking"]["type"], "adaptive");
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(
+            message_block_ids(&messages[1], "tool_use", "id"),
+            vec!["custom1", "search1"]
+        );
+        assert_eq!(
+            message_block_ids(&messages[2], "tool_result", "tool_use_id"),
+            vec!["custom1", "search1"]
+        );
+    }
+
+    #[test]
+    fn unsigned_adaptive_history_still_obeys_explicit_thinking_and_tool_choice_rules() {
+        let mut input = signed_tool_loop_input();
+        input.remove(1);
+        for (model, effort, expected) in [
+            ("Claude-5.5-opus", None, "adaptive"),
+            ("Claude-5.5-opus", Some("none"), "adaptive"),
+            ("claude-opus-4-8", Some("none"), "disabled"),
+        ] {
+            let mut body = json!({"model":model,"input":input});
+            if let Some(effort) = effort {
+                body["reasoning"] = json!({"effort":effort});
+            }
+            let result = responses_request_to_anthropic(body, 20000).unwrap();
+            assert_eq!(result["thinking"]["type"], expected);
+            if model == "Claude-5.5-opus" && effort == Some("none") {
+                assert_eq!(result["output_config"]["effort"], "low");
+            }
+        }
+        let forced = responses_request_to_anthropic(
+            json!({
+                "model":"Claude-5.5-opus","input":input,"reasoning":{"effort":"high"},
+                "tools":[{"type":"function","name":"probe","parameters":{"type":"object"}}],"tool_choice":"required"
+            }),
+            20000,
+        );
+        assert!(
+            matches!(forced,Err(ProxyError::InvalidRequest(message)) if message.contains("forced tool_choice"))
+        );
+        let prefill = responses_request_to_anthropic(
+            json!({"model":"Claude-5.5-opus","input":[{"role":"user","content":"question"},{"role":"assistant","content":"unfinished prefill"}]}),
+            20000,
+        );
+        assert!(
+            matches!(prefill,Err(ProxyError::InvalidRequest(message)) if message.contains("assistant prefill"))
+        );
     }
 
     #[test]

@@ -3927,6 +3927,246 @@ model_provider = "c"
 
     #[tokio::test]
     #[serial]
+    async fn codex_protected_editor_previews_are_read_only_in_every_mode() {
+        let _home = Home::new();
+        set_preservation(true);
+        seed_codex(CODEX_USER_LIVE, Some(&chatgpt_login("preview-account")));
+        let [a, b] = codex_a_b();
+        let official = codex_official();
+        let state = state_with(
+            AppType::Codex,
+            &[a.clone(), b.clone(), official.clone()],
+            "a",
+        )
+        .await;
+        let drafts = [
+            a.settings_config,
+            b.settings_config,
+            codex_keyless_template(),
+        ];
+
+        for proxy_mode in [None, Some(false), Some(true)] {
+            // Set up each actual mode before enabling protection for its previews.
+            let snapshot = crate::codex_protection::snapshot().unwrap();
+            crate::codex_protection::save_rules(vec![], &snapshot.rules_revision).unwrap();
+            if let Some(stack) = proxy_mode {
+                enter(&state, &AppType::Codex, stack).await.unwrap();
+            }
+            let config = "model_provider = \"OpenAI\"\nmodel = \"live-only-model\"\nopenai_base_url = \"http://127.0.0.1:15721/v1\"\nmodel_catalog_json = \"personal.json\"\napproval_policy = \"on-request\"\n[model_providers.OpenAI]\nname = \"My local route\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nexperimental_bearer_token = \"local-only-key\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n[model_providers.custom]\nname = \"Old route\"\nbase_url = \"https://old.example/v1\"\nexperimental_bearer_token = \"old-only-key\"\n";
+            fs::write(codex_config_path(), config).unwrap();
+            let snapshot = crate::codex_protection::snapshot().unwrap();
+            crate::codex_protection::save_rules(
+                snapshot
+                    .fields
+                    .into_iter()
+                    .map(|field| field.path)
+                    .collect(),
+                &snapshot.rules_revision,
+            )
+            .unwrap();
+            let store = DeviceStore::for_device();
+            let paths = [
+                codex_config_path(),
+                codex_auth_path(),
+                crate::codex_config::get_codex_model_catalog_path(),
+                store.file("codex-config-protection.json"),
+                store.state_path(),
+            ];
+            let before: Vec<_> = paths
+                .iter()
+                .map(|path| {
+                    (
+                        crate::live::engine::read_current(path).unwrap(),
+                        fs::metadata(path)
+                            .ok()
+                            .map(|metadata| metadata.modified().unwrap()),
+                    )
+                })
+                .collect();
+            let pointer = in_use(&state, &AppType::Codex);
+            for draft in &drafts {
+                // Both existing-card details and new/preset drafts use this service.
+                let view = ProviderService::editor_view(&state, AppType::Codex, draft, None)
+                    .unwrap_or_else(|error| panic!("preview in {proxy_mode:?}: {error}"));
+                let shown = view.settings["config"].as_str().unwrap();
+                let doc: toml::Table = toml::from_str(shown).unwrap();
+                let row: toml::Table = toml::from_str(draft["config"].as_str().unwrap()).unwrap();
+                assert_eq!(doc["model"], row["model"]);
+                assert_eq!(doc["model_provider"].as_str(), Some("custom"));
+                assert_eq!(doc["approval_policy"].as_str(), Some("on-request"));
+                assert_eq!(view.settings["auth"], draft["auth"]);
+                assert!(!shown.contains("pending-key"));
+                assert!(doc["model_providers"]["custom"]
+                    .get("experimental_bearer_token")
+                    .is_none());
+            }
+            ProviderService::editor_view(
+                &state,
+                AppType::Codex,
+                &official.settings_config,
+                Some("official"),
+            )
+            .unwrap();
+            for (path, expected) in paths.iter().zip(before) {
+                assert_eq!(
+                    crate::live::engine::read_current(path).unwrap(),
+                    expected.0,
+                    "{}",
+                    path.display()
+                );
+                assert_eq!(
+                    fs::metadata(path)
+                        .ok()
+                        .map(|metadata| metadata.modified().unwrap()),
+                    expected.1
+                );
+            }
+            assert_eq!(in_use(&state, &AppType::Codex), pointer);
+            // The same real switch must still be refused.
+            assert!(ProviderService::switch(&state, AppType::Codex, "b").is_err());
+            assert_eq!(codex_text(), config);
+            assert_eq!(in_use(&state, &AppType::Codex), pointer);
+            // Clean up each mode without altering the user's real proxy.
+            let snapshot = crate::codex_protection::snapshot().unwrap();
+            crate::codex_protection::save_rules(vec![], &snapshot.rules_revision).unwrap();
+            if proxy_mode.is_some() {
+                exit(&state, &AppType::Codex).await.unwrap();
+            }
+        }
+        state.proxy_service.stop().await.ok();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_editor_preview_ignores_profile_conflicts_but_real_writes_do_not() {
+        let _home = Home::new();
+        set_preservation(true);
+        let live = format!("profile = \"work\"\n{CODEX_USER_LIVE}\n[profiles.work]\nmodel_provider = \"ollama_local\"\n");
+        seed_codex(&live, None);
+        let [a, b] = codex_a_b();
+        let state = state_with(AppType::Codex, &[a, b.clone()], "a").await;
+        for protected in [false, true] {
+            let snapshot = crate::codex_protection::snapshot().unwrap();
+            let paths = if protected {
+                crate::codex_protection::Rules::default().paths
+            } else {
+                vec![]
+            };
+            crate::codex_protection::save_rules(paths, &snapshot.rules_revision).unwrap();
+            let view =
+                ProviderService::editor_view(&state, AppType::Codex, &b.settings_config, None)
+                    .expect("view only");
+            let doc: toml::Table =
+                toml::from_str(view.settings["config"].as_str().unwrap()).unwrap();
+            assert_eq!(doc["model"].as_str(), Some("gpt-b"));
+            assert_eq!(doc["profile"].as_str(), Some("work"));
+            assert!(ProviderService::switch(&state, AppType::Codex, "b").is_err());
+            assert_eq!(codex_text(), live);
+            assert_eq!(direct(&state, &AppType::Codex).as_deref(), Some("a"));
+        }
+        fs::write(codex_config_path(), "model = [\n").unwrap();
+        assert!(
+            ProviderService::editor_view(&state, AppType::Codex, &b.settings_config, None).is_err()
+        );
+        assert_eq!(codex_text(), "model = [\n");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_protected_editor_saves_provider_values_without_copying_live_connection() {
+        let _home = Home::new();
+        set_preservation(true);
+        let live = "model_provider = \"OpenAI\"\nmodel = \"live-only-model\"\nmodel_catalog_json = \"personal.json\"\n[model_providers.OpenAI]\nname = \"My local route\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nexperimental_bearer_token = \"local-only-key\"\nwire_api = \"responses\"\n";
+        let auth = chatgpt_login("preview-account");
+        seed_codex(live, Some(&auth));
+        let [a, b] = codex_a_b();
+        let state = state_with(AppType::Codex, &[a.clone(), b.clone()], "a").await;
+        let snapshot = crate::codex_protection::snapshot().unwrap();
+        crate::codex_protection::save_rules(
+            snapshot
+                .fields
+                .into_iter()
+                .map(|field| field.path)
+                .collect(),
+            &snapshot.rules_revision,
+        )
+        .unwrap();
+
+        let view =
+            ProviderService::editor_view(&state, AppType::Codex, &b.settings_config, None).unwrap();
+        let mut edited = b.clone();
+        edited.name = "Renamed provider".into();
+        edited.settings_config = view.settings.clone();
+        edited.settings_config["config"] = json!(view.settings["config"]
+            .as_str()
+            .unwrap()
+            .replace("gpt-b", "gpt-b2"));
+        ProviderService::update_from_editor(
+            &state,
+            AppType::Codex,
+            Some("b"),
+            edited,
+            Some(crate::services::provider::EditorSave {
+                base: view.settings,
+                draft: None,
+                on_conflict: Default::default(),
+            }),
+        )
+        .expect("an inactive provider can be edited independently of the live connection");
+        let stored = state.db.get_provider_by_id("b", "codex").unwrap().unwrap();
+        assert_eq!(stored.name, "Renamed provider");
+        assert_eq!(stored.settings_config["auth"], b.settings_config["auth"]);
+        let stored_config = stored.settings_config["config"].as_str().unwrap();
+        assert!(stored_config.contains("gpt-b2"));
+        assert!(stored_config.contains("https://b.example/v1"));
+        assert!(!stored_config.contains("local-only-key"));
+        assert!(!stored_config.contains("personal.json"));
+        assert_eq!(codex_text(), live);
+
+        let template = codex_keyless_template();
+        let view = ProviderService::editor_view(&state, AppType::Codex, &template, None).unwrap();
+        add_from_editor(
+            &state,
+            AppType::Codex,
+            Provider::with_id("c".into(), "C".into(), template, None),
+            view.settings.clone(),
+            view.settings,
+        )
+        .expect("a new provider draft may be saved without changing live");
+        assert_eq!(codex_text(), live);
+        assert!(state.db.get_provider_by_id("c", "codex").unwrap().is_some());
+
+        // Editing the active direct provider really writes live, so it must still fail.
+        let view =
+            ProviderService::editor_view(&state, AppType::Codex, &a.settings_config, None).unwrap();
+        let mut edited = a.clone();
+        edited.name = "Must roll back".into();
+        edited.settings_config = view.settings.clone();
+        let result = ProviderService::update_from_editor(
+            &state,
+            AppType::Codex,
+            Some("a"),
+            edited,
+            Some(crate::services::provider::EditorSave {
+                base: view.settings,
+                draft: None,
+                on_conflict: Default::default(),
+            }),
+        );
+        assert!(result.is_err());
+        let unchanged = state.db.get_provider_by_id("a", "codex").unwrap().unwrap();
+        assert_eq!(unchanged.name, a.name);
+        assert_eq!(unchanged.settings_config, a.settings_config);
+        assert_eq!(codex_text(), live);
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&codex_auth_path()).unwrap(),
+            auth
+        );
+        assert_eq!(direct(&state, &AppType::Codex).as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn codex_editor_saves_key_fields_to_the_row_and_global_edits_to_live() {
         let _home = Home::new();
         set_preservation(true);

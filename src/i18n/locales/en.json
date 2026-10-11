@@ -226,7 +226,7 @@
       }
     },
     "duplicateLiveIdsLoadFailed": "Failed to read provider identifiers from config, please fix the config and try again",
-    "editorViewFailed": "Cannot read the client config file, so the saved provider configuration is shown below: {{error}}",
+    "editorViewFailed": "Cannot generate the provider configuration preview. The saved provider configuration is shown below: {{error}}",
     "editConflict": {
       "title": "The config file changed while you were editing",
       "message": "After the editor opened, the settings below were changed by another program (such as Claude Code). Overwrite them with your edits, or keep the external changes? Your other edits are saved either way.",

@@ -226,7 +226,7 @@
       }
     },
     "duplicateLiveIdsLoadFailed": "讀取設定中的供應商識別碼失敗，請先修復設定後再試",
-    "editorViewFailed": "無法讀取用戶端設定檔，下方顯示的是保存的供應商設定：{{error}}",
+    "editorViewFailed": "無法產生供應商設定預覽，下方顯示的是已儲存的供應商設定：{{error}}",
     "editConflict": {
       "title": "設定檔在編輯期間被修改",
       "message": "開啟編輯器之後，下面這些設定被其他程式（例如 Claude Code）改過。要用你的修改覆蓋，還是保留外部的修改？其餘變更都會照常儲存。",

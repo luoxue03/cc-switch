@@ -1132,6 +1132,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fragmented_signed_stream_then_tool_only_continuation_round_trips() {
+        use super::super::transform_codex_anthropic::{
+            anthropic_response_to_responses, anthropic_sse_to_message_value,
+            responses_request_to_anthropic,
+        };
+        let blocks = vec![
+            json!({"type":"thinking","thinking":"","signature":"signed-reasoning"}),
+            json!({"type":"text","text":"Starting tool one"}),
+            json!({"type":"tool_use","id":"c1","name":"first","input":{"value":1}}),
+            json!({"type":"thinking","thinking":"Starting tool two","signature":"signed-update"}),
+            json!({"type":"redacted_thinking","data":"redacted-data"}),
+            json!({"type":"tool_use","id":"c2","name":"second","input":{}}),
+        ];
+        let mut wire = String::new();
+        let mut emit = |data: Value| {
+            wire.push_str(&format!(
+                "event: {}\ndata: {}\n\n",
+                data["type"].as_str().unwrap(),
+                data
+            ));
+        };
+        emit(json!({"type":"message_start","message":{"id":"msg_loop","model":"Claude-5.5-opus"}}));
+        for (index, block) in blocks.iter().enumerate() {
+            let mut start = block.clone();
+            if start["type"] == "thinking" {
+                start["thinking"] = json!("");
+                start["signature"] = json!("");
+            }
+            emit(json!({"type":"content_block_start","index":index,"content_block":start}));
+            if block["type"] == "thinking" {
+                emit(
+                    json!({"type":"content_block_delta","index":index,"delta":{"type":"thinking_delta","thinking":block["thinking"]}}),
+                );
+                emit(
+                    json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":block["signature"]}}),
+                );
+            }
+            emit(json!({"type":"content_block_stop","index":index}));
+        }
+        emit(json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}));
+        emit(json!({"type":"message_stop"}));
+        let upstream = stream::iter(
+            wire.as_bytes()
+                .chunks(7)
+                .map(|chunk| Ok::<_, std::io::Error>(Bytes::copy_from_slice(chunk)))
+                .collect::<Vec<_>>(),
+        );
+        let merged = create_responses_sse_stream_from_anthropic(upstream)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+        let events = merged
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .collect::<Vec<_>>();
+        let completed = events
+            .iter()
+            .find(|e| e["type"] == "response.completed")
+            .unwrap();
+        let done = events
+            .iter()
+            .filter(|e| e["type"] == "response.output_item.done")
+            .map(|e| e["item"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(json!(done), completed["response"]["output"]);
+        // Also exercise the fallback for gateways that send SSE without its content type.
+        let buffered =
+            anthropic_response_to_responses(anthropic_sse_to_message_value(&wire).unwrap())
+                .unwrap();
+        for output in [&completed["response"]["output"], &buffered["output"]] {
+            let mut input = vec![json!({"role":"user","content":"Run the tools"})];
+            input.extend(output.as_array().unwrap().iter().cloned());
+            input.extend([
+                json!({"type":"function_call_output","call_id":"c1","output":"one"}),
+                json!({"type":"function_call_output","call_id":"c2","output":"two"}),
+                json!({"type":"function_call","call_id":"c3","name":"third","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":"c3","output":"three"}),
+            ]);
+            let replay = responses_request_to_anthropic(
+                json!({"model":"Claude-5.5-opus","reasoning":{"effort":"high"},"input":input}),
+                20000,
+            )
+            .unwrap();
+            assert_eq!(replay["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(replay["output_config"]["effort"], "high");
+            assert_eq!(replay["messages"][1]["content"], json!(blocks));
+            assert_eq!(
+                replay["messages"][3]["content"].as_array().unwrap().len(),
+                1
+            );
+            assert_eq!(replay["messages"][4]["content"][0]["tool_use_id"], "c3");
+        }
+    }
+
+    #[tokio::test]
     async fn test_max_tokens_incomplete() {
         let input = concat!(
             "event: message_start\n",

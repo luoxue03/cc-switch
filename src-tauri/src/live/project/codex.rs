@@ -604,6 +604,27 @@ pub fn row_catalog_pointer(top: &[(String, TomlValue)]) -> Option<&(String, Toml
 impl CodexConfigPatch {
     pub fn apply_to(&self, path: &Path, doc: &mut DocumentMut) -> Result<(), LiveWriteError> {
         let before = doc.clone();
+        self.project_fields(path, doc)?;
+        if crate::codex_protection::protect_projection(path, &before, doc)? {
+            Ok(())
+        } else {
+            check_effective_route(doc, self.route.selector())
+        }
+    }
+
+    /// Render the provider's draft on a copy of live TOML. Viewing a draft does
+    /// not assert that it can become the effective route or permit writing it.
+    pub(crate) fn preview(
+        &self,
+        path: &Path,
+        before: &DocumentMut,
+    ) -> Result<DocumentMut, LiveWriteError> {
+        let mut doc = before.clone();
+        self.project_fields(path, &mut doc)?;
+        Ok(doc)
+    }
+
+    fn project_fields(&self, path: &Path, doc: &mut DocumentMut) -> Result<(), LiveWriteError> {
         let target_top: Vec<&str> = self
             .top
             .iter()
@@ -701,11 +722,7 @@ impl CodexConfigPatch {
             put_value(root, MODEL_CATALOG_JSON, &TomlValue::from(CATALOG_FILENAME));
         }
 
-        if crate::codex_protection::protect_projection(path, &before, doc)? {
-            Ok(())
-        } else {
-            check_effective_route(doc, selector)
-        }
+        Ok(())
     }
 
     fn write_route(&self, path: &Path, doc: &mut DocumentMut) -> Result<(), LiveWriteError> {

@@ -1,6 +1,6 @@
 //! Codex 供应商编辑器：底部的 config.toml 就是「切到这个供应商之后 config.toml 的样子」。
 //!
-//! - 显示：在内存里对当前 live 做一次切换投影（和切换用同一个补丁），关键字段、独有字段
+//! - 显示：在内存里对当前 live 做一次供应商预览（不检查保护规则和有效路由），关键字段、独有字段
 //!   换成这个供应商的，其余部分是 live 原样。Key 显示在 API Key 输入框里（行的 `auth`），
 //!   不在 TOML 里重复。
 //! - 保存：关键字段、独有字段写回这个供应商的行（行里其余内容原样保留）；其余部分的改动
@@ -109,7 +109,7 @@ pub fn view(
 ) -> Result<EditorView, AppError> {
     let path = get_codex_config_path();
     let pre = read_current(&path)?;
-    let mut doc = parse(&path, pre.as_deref())?;
+    let doc = parse(&path, pre.as_deref())?;
 
     let mut provider =
         Provider::with_id(String::new(), String::new(), settings_config.clone(), None);
@@ -117,7 +117,7 @@ pub fn view(
     provider.meta = meta.cloned();
     let live_owner = LiveOwner::read(state)?;
     let planned = plan_for_view(&state.db, &live_owner.owner(), &provider)?;
-    planned.config().apply_to(&path, &mut doc)?;
+    let mut doc = planned.config().preview(&path, &doc)?;
 
     // Key 在 API Key 输入框里（行的 auth），TOML 里不再重复显示。
     let row_key = settings_config

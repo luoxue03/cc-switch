@@ -226,7 +226,7 @@
       }
     },
     "duplicateLiveIdsLoadFailed": "读取配置中的供应商标识失败，请先修复配置后再试",
-    "editorViewFailed": "无法读取客户端配置文件，下面显示的是保存的供应商配置：{{error}}",
+    "editorViewFailed": "无法生成供应商配置预览，下面显示的是已保存的供应商配置：{{error}}",
     "editConflict": {
       "title": "配置文件在编辑期间被修改",
       "message": "打开编辑器之后，下面这些设置被其他程序（比如 Claude Code）改过。要用你的修改覆盖，还是保留外部的修改？其余改动都会照常保存。",
